@@ -60,7 +60,36 @@ bool vrt_scheduler_add_task(
     task->node.next = NULL;
     task->node.prev = NULL;
 
-    if (!vrt_list_push_back(&scheduler->readyQueue, &task->node))
+    vrt_list_node_t *current =
+        scheduler->readyQueue.head;
+
+    while (current != NULL)
+    {
+        vrt_task_t *existingTask =
+            (vrt_task_t *)current->owner;
+
+        if (task->priority >
+            existingTask->priority)
+        {
+            if (!vrt_list_insert_before(
+                    &scheduler->readyQueue,
+                    current,
+                    &task->node))
+            {
+                return false;
+            }
+
+            scheduler->taskCount++;
+
+            return true;
+        }
+
+        current = current->next;
+    }
+
+    if (!vrt_list_push_back(
+            &scheduler->readyQueue,
+            &task->node))
     {
         return false;
     }

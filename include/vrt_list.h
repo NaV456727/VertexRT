@@ -48,6 +48,21 @@ extern "C"
     bool vrt_list_is_empty(const vrt_list_t *list);
     uint32_t vrt_list_size(const vrt_list_t *list);
 
+    /**
+     * @brief Insert a node before another node.
+     *
+     * @param list Pointer to the list.
+     * @param position Node to insert before.
+     * @param node Node to insert.
+     *
+     * @return true on success.
+     * @return false on failure.
+     */
+    bool vrt_list_insert_before(
+        vrt_list_t *list,
+        vrt_list_node_t *position,
+        vrt_list_node_t *node);
+
 #ifdef __cplusplus
 }
 #endif

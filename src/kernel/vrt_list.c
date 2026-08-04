@@ -118,3 +118,40 @@ vrt_list_node_t *vrt_list_pop_back(vrt_list_t *list)
 
     return node;
 }
+
+bool vrt_list_insert_before(
+    vrt_list_t *list,
+    vrt_list_node_t *position,
+    vrt_list_node_t *node)
+{
+    if (list == NULL ||
+        position == NULL ||
+        node == NULL)
+    {
+        return false;
+    }
+
+    if (node->next != NULL ||
+        node->prev != NULL)
+    {
+        return false;
+    }
+
+    node->next = position;
+    node->prev = position->prev;
+
+    if (position->prev != NULL)
+    {
+        position->prev->next = node;
+    }
+    else
+    {
+        list->head = node;
+    }
+
+    position->prev = node;
+
+    list->size++;
+
+    return true;
+}

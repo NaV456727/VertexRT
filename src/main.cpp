@@ -3,29 +3,47 @@
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
 
+/*=========================================================
+ * Global Objects
+ *========================================================*/
+
 vrt_scheduler_t scheduler;
 
 vrt_task_t blinkTask;
 
 uint32_t blinkStack[256];
 
-/* Test Task */
+/*=========================================================
+ * Task Functions
+ *========================================================*/
+
 void blink(void *argument)
 {
-    Serial.println("Blink Task Started");
+    Serial.println("Blink Task Running");
 }
+
+/*=========================================================
+ * Arduino Setup
+ *========================================================*/
 
 void setup()
 {
     Serial.begin(115200);
-    delay(1000);
 
-    Serial.println("VertexRT Booting...");
+    while (!Serial)
+    {
+        ;
+    }
 
-    /* Initialize Scheduler */
+    Serial.println();
+    Serial.println("=================================");
+    Serial.println("VertexRT Scheduler Tick Test");
+    Serial.println("=================================");
+
+    /* Initialize scheduler */
     vrt_scheduler_init(&scheduler);
 
-    /* Initialize Task */
+    /* Initialize task */
     vrt_task_init(
         &blinkTask,
         blink,
@@ -33,46 +51,51 @@ void setup()
         1,
         blinkStack,
         256,
-        "Blink");
+        "Blink Task");
 
-    /* Register Task */
-    if (!vrt_scheduler_add_task(&scheduler, &blinkTask))
+    /* Register task */
+    if (!vrt_scheduler_add_task(
+            &scheduler,
+            &blinkTask))
     {
-        Serial.println("Failed to register task.");
-        return;
+        Serial.println("ERROR: Failed to register task.");
+
+        while (1)
+        {
+        }
     }
 
-    Serial.println("Task Registered.");
-
-    /* Start Scheduler */
+    /* Start scheduler */
     vrt_scheduler_start(&scheduler);
 
-    if (scheduler.currentTask != NULL)
-    {
-        Serial.print("Current Task: ");
-        Serial.println(scheduler.currentTask->name);
+    Serial.print("Current Task: ");
+    Serial.println(scheduler.currentTask->name);
 
-        /*
-         * Temporary:
-         * Execute the task manually.
-         * Later this will be replaced by the first
-         * context switch.
-         */
-        scheduler.currentTask->entry(
-            scheduler.currentTask->argument);
-    }
-    else
-    {
-        Serial.println("No current task.");
-    }
-
-    Serial.println("Setup Complete.");
+    Serial.println();
+    Serial.println("Starting Tick Simulation...");
 }
+
+/*=========================================================
+ * Arduino Loop
+ *========================================================*/
 
 void loop()
 {
-    /*
-     * Empty for now.
-     * The scheduler will eventually take control.
-     */
+    delay(1000);
+
+    vrt_scheduler_tick(&scheduler);
+
+    Serial.print("Tick: ");
+    Serial.print(scheduler.tickCount);
+
+    Serial.print(" | Running: ");
+    Serial.println(scheduler.currentTask->name);
+
+    /* Temporary
+       Execute current task manually.
+       Later this will happen through
+       context switching.
+    */
+    scheduler.currentTask->entry(
+        scheduler.currentTask->argument);
 }
