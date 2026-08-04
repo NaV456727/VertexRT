@@ -19,8 +19,11 @@ uint32_t vrt_list_size(const vrt_list_t *list)
 
 bool vrt_list_push_back(vrt_list_t *list, vrt_list_node_t *node)
 {
-    if (node == NULL)
+    if (node == NULL || list == NULL)
+    {
+
         return false;
+    }
 
     node->next = NULL;
     node->prev = list->tail;
@@ -38,8 +41,11 @@ bool vrt_list_push_back(vrt_list_t *list, vrt_list_node_t *node)
 
 bool vrt_list_push_front(vrt_list_t *list, vrt_list_node_t *node)
 {
-    if (node == NULL)
+    if (node == NULL || list == NULL)
+    {
+
         return false;
+    }
 
     node->prev = NULL;
     node->next = list->head;
@@ -57,8 +63,10 @@ bool vrt_list_push_front(vrt_list_t *list, vrt_list_node_t *node)
 
 bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node)
 {
-    if (node == NULL)
+    if (node == NULL || list == NULL || vrt_list_is_empty(list))
+    {
         return false;
+    }
 
     if (node->prev != NULL)
         node->prev->next = node->next;
@@ -72,8 +80,13 @@ bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node)
 
     node->next = NULL;
     node->prev = NULL;
+    node->owner = NULL;
 
-    list->size--;
+    if (list->size > 0)
+    {
+
+        list->size--;
+    }
 
     return true;
 }
@@ -81,7 +94,9 @@ bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node)
 vrt_list_node_t *vrt_list_pop_front(vrt_list_t *list)
 {
     if (vrt_list_is_empty(list))
+    {
         return NULL;
+    }
 
     vrt_list_node_t *node = list->head;
 
@@ -93,7 +108,9 @@ vrt_list_node_t *vrt_list_pop_front(vrt_list_t *list)
 vrt_list_node_t *vrt_list_pop_back(vrt_list_t *list)
 {
     if (vrt_list_is_empty(list))
+    {
         return NULL;
+    }
 
     vrt_list_node_t *node = list->tail;
 

@@ -3,5 +3,6 @@
 
 #define VRT_MAX_TASKS 8
 #define VRT_STACK_SIZE 1024
+#define VRT_TASK_NAME_LENGTH 16
 
 #endif

@@ -10,27 +10,41 @@ extern "C"
 
     typedef struct vrt_list_node
     {
+        /* Adjacent nodes */
         struct vrt_list_node *next;
         struct vrt_list_node *prev;
-        void *data;
+
+        /* Object that owns this node */
+        void *owner;
+
     } vrt_list_node_t;
 
-    typedef struct
+    typedef struct vrt_list
     {
+        /* First node */
         vrt_list_node_t *head;
+
+        /* Last node */
         vrt_list_node_t *tail;
+
+        /* Number of nodes in the list */
         uint32_t size;
+
     } vrt_list_t;
 
+    /* Initialize */
     void vrt_list_init(vrt_list_t *list);
 
+    /* Insertion */
     bool vrt_list_push_back(vrt_list_t *list, vrt_list_node_t *node);
     bool vrt_list_push_front(vrt_list_t *list, vrt_list_node_t *node);
-    bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node);
 
+    /* Removal */
+    bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node);
     vrt_list_node_t *vrt_list_pop_front(vrt_list_t *list);
     vrt_list_node_t *vrt_list_pop_back(vrt_list_t *list);
 
+    /* Utilities */
     bool vrt_list_is_empty(const vrt_list_t *list);
     uint32_t vrt_list_size(const vrt_list_t *list);
 
