@@ -1,4 +1,5 @@
 #include "vrt_task.h"
+#include "vrt_scheduler.h"
 
 #include <string.h>
 
@@ -38,4 +39,17 @@ void vrt_task_init(
 
     strncpy(task->name, name, VRT_TASK_NAME_LENGTH - 1);
     task->name[VRT_TASK_NAME_LENGTH - 1] = '\0';
+}
+
+void vrt_task_yield(void)
+{
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    vrt_scheduler_schedule(scheduler);
 }

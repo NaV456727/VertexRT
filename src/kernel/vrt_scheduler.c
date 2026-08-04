@@ -1,6 +1,12 @@
 #include "vrt_scheduler.h"
 
 /*=========================================================
+ * Private Variables
+ *========================================================*/
+
+static vrt_scheduler_t *g_scheduler = NULL;
+
+/*=========================================================
  * Private Functions
  *========================================================*/
 
@@ -8,6 +14,9 @@ static vrt_task_t *vrt_scheduler_select_next_task(
     vrt_scheduler_t *scheduler);
 
 static vrt_task_t *vrt_scheduler_get_first_task(
+    vrt_scheduler_t *scheduler);
+
+static vrt_task_t *vrt_scheduler_select_next_task(
     vrt_scheduler_t *scheduler);
 
 void vrt_scheduler_init(vrt_scheduler_t *scheduler)
@@ -26,6 +35,9 @@ void vrt_scheduler_init(vrt_scheduler_t *scheduler)
     scheduler->taskCount = 0;
 
     scheduler->running = false;
+
+    /* Set the global scheduler instance */
+    g_scheduler = scheduler;
 }
 
 static vrt_task_t *vrt_scheduler_get_first_task(
@@ -200,4 +212,9 @@ void vrt_scheduler_tick(
     scheduler->tickCount++;
 
     vrt_scheduler_schedule(scheduler);
+}
+
+vrt_scheduler_t *vrt_scheduler_get_instance(void)
+{
+    return g_scheduler;
 }

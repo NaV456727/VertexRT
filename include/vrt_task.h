@@ -59,6 +59,14 @@ extern "C"
         uint32_t stackSize,
         const char *name);
 
+    /**
+     * @brief Voluntarily yield the processor.
+     *
+     * The current task gives up the CPU so another
+     * runnable task may execute.
+     */
+    void vrt_task_yield(void);
+
 #ifdef __cplusplus
 }
 #endif

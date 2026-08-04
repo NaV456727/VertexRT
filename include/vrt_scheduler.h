@@ -82,6 +82,13 @@ extern "C"
         vrt_scheduler_t *scheduler);
 
     /**
+     * @brief Get the active scheduler instance.
+     *
+     * @return Pointer to the active scheduler.
+     */
+    vrt_scheduler_t *vrt_scheduler_get_instance(void);
+
+    /**
      * @brief Process one system tick.
      *
      * Called by the hardware timer interrupt.
