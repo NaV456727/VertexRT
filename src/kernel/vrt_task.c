@@ -1,5 +1,6 @@
 #include "vrt_task.h"
 #include "vrt_scheduler.h"
+#include "vrt_port.h"
 
 #include <string.h>
 
@@ -28,10 +29,14 @@ void vrt_task_init(
 
     task->state = VRT_TASK_READY;
 
-    task->sp = stackStart;
     task->stackStart = stackStart;
-    task->stackEnd = stackStart + stackSize - 1;
+    task->stackEnd = stackStart + stackSize;
     task->stackSize = stackSize;
+
+    task->sp = vrt_port_stack_init(
+        task->stackEnd,
+        task->entry,
+        task->argument);
 
     task->node.owner = task;
     task->node.next = NULL;
