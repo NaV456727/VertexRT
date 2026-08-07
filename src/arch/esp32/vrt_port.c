@@ -13,6 +13,10 @@
 
 typedef struct vrt_stack_frame
 {
+    /*=====================================================
+     * Exception Frame
+     *====================================================*/
+
     /* Program Counter */
     uint32_t pc;
 
@@ -25,11 +29,11 @@ typedef struct vrt_stack_frame
     /* Stack Pointer */
     uint32_t a1;
 
-    /* Function Argument */
+    /* Function Arguments */
     uint32_t a2;
+    uint32_t a3;
 
     /* General Purpose Registers */
-    uint32_t a3;
     uint32_t a4;
     uint32_t a5;
     uint32_t a6;
@@ -42,6 +46,21 @@ typedef struct vrt_stack_frame
     uint32_t a13;
     uint32_t a14;
     uint32_t a15;
+
+    /*=====================================================
+     * Special Registers
+     *====================================================*/
+
+    /* Shift Amount Register */
+    uint32_t sar;
+
+    /* Zero-Overhead Loop Registers */
+    uint32_t lbeg;
+    uint32_t lend;
+    uint32_t lcount;
+
+    /* Exception Exit Handler */
+    uint32_t exit;
 
 } vrt_stack_frame_t;
 
@@ -93,6 +112,39 @@ uint32_t *vrt_port_stack_init(
 
     /* Task Argument */
     frame->a2 = (uintptr_t)argument;
+
+    /*
+     * Initialize remaining registers.
+     */
+
+    frame->a3 = 0;
+    frame->a4 = 0;
+    frame->a5 = 0;
+    frame->a6 = 0;
+    frame->a7 = 0;
+    frame->a8 = 0;
+    frame->a9 = 0;
+    frame->a10 = 0;
+    frame->a11 = 0;
+    frame->a12 = 0;
+    frame->a13 = 0;
+    frame->a14 = 0;
+    frame->a15 = 0;
+
+    /* Special Registers */
+    frame->sar = 0;
+    frame->lbeg = 0;
+    frame->lend = 0;
+    frame->lcount = 0;
+
+    /*
+     * Exception exit handler.
+     *
+     * TODO:
+     * Replace with the architecture-specific
+     * context restore routine.
+     */
+    frame->exit = 0;
 
     return alignedStack;
 }

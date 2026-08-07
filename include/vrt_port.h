@@ -40,6 +40,22 @@ extern "C"
         vrt_task_function_t entry,
         void *argument);
 
+    /*=========================================================
+     * Context Switching
+     *========================================================*/
+
+    /**
+     * @brief Starts execution of the first task.
+     *
+     * This function never returns.
+     */
+    void vrt_port_start_first_task(void);
+
+    /**
+     * @brief Performs a context switch.
+     */
+    void vrt_port_switch_context(void);
+
 #ifdef __cplusplus
 }
 #endif

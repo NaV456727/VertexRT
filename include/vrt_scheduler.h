@@ -98,6 +98,11 @@ extern "C"
     void vrt_scheduler_tick(
         vrt_scheduler_t *scheduler);
 
+    /**
+     * @brief Returns the active scheduler instance.
+     */
+    vrt_scheduler_t *vrt_scheduler_get_instance(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,4 +1,5 @@
 #include "vrt_scheduler.h"
+#include "vrt_port.h"
 
 /*=========================================================
  * Private Variables
@@ -14,9 +15,6 @@ static vrt_task_t *vrt_scheduler_select_next_task(
     vrt_scheduler_t *scheduler);
 
 static vrt_task_t *vrt_scheduler_get_first_task(
-    vrt_scheduler_t *scheduler);
-
-static vrt_task_t *vrt_scheduler_select_next_task(
     vrt_scheduler_t *scheduler);
 
 void vrt_scheduler_init(vrt_scheduler_t *scheduler)
@@ -158,7 +156,7 @@ void vrt_scheduler_start(vrt_scheduler_t *scheduler)
     scheduler->currentTask->state = VRT_TASK_RUNNING;
     scheduler->running = true;
 
-    /* TODO: Perform the first context switch */
+    vrt_port_start_first_task();
 }
 
 void vrt_scheduler_schedule(
