@@ -1,100 +1,138 @@
 #include "vrt_tick.h"
 #include "vrt_scheduler.h"
 
+#include <Arduino.h>
+
 /*=========================================================
- * Private Variables
+ * Tick State
  *=========================================================*/
 
-/*
- * Global system tick counter.
- *
- * This is maintained by the kernel tick subsystem.
- */
-static volatile uint32_t g_tick_count = 0;
+static volatile uint32_t vrt_tick_count = 0;
+
+static hw_timer_t *vrt_timer = NULL;
 
 /*=========================================================
- * Tick Initialization
+ * Tick Interrupt Handler
+ *=========================================================*/
+
+static void IRAM_ATTR vrt_tick_isr(void)
+{
+    vrt_tick_count++;
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler != NULL)
+    {
+        vrt_scheduler_tick(scheduler);
+    }
+}
+
+/*=========================================================
+ * Initialization
  *=========================================================*/
 
 void vrt_tick_init(void)
 {
+    vrt_tick_count = 0;
+
     /*
-     * Reset the kernel tick counter.
+     * ESP32 timer clock:
      *
-     * Hardware timer configuration is handled by
-     * the architecture-specific tick port.
+     * APB clock = 80 MHz
+     *
+     * Divider = 80
+     *
+     * Timer frequency = 1 MHz
+     *
+     * Therefore:
+     *
+     *     1 timer tick = 1 microsecond
      */
-    g_tick_count = 0;
+    vrt_timer = timerBegin(
+        0,
+        80,
+        true);
+
+    if (vrt_timer == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Attach the tick interrupt.
+     *
+     * false = level-triggered interrupt.
+     */
+    timerAttachInterrupt(
+        vrt_timer,
+        &vrt_tick_isr,
+        false);
+
+    /*
+     * 1 MHz timer frequency means:
+     *
+     *     1000 ticks = 1 ms
+     *
+     * Therefore a 1000 Hz system tick
+     * requires a 1000 us alarm period.
+     */
+    timerAlarmWrite(
+        vrt_timer,
+        1000,
+        true);
 }
 
 /*=========================================================
- * Tick Start
+ * Start
  *=========================================================*/
 
 void vrt_tick_start(void)
 {
-    /*
-     * The actual hardware timer will be started by
-     * the architecture-specific implementation.
-     *
-     * The kernel itself does not directly access
-     * ESP32 timer registers or APIs.
-     */
+    if (vrt_timer == NULL)
+    {
+        return;
+    }
+
+    timerAlarmEnable(vrt_timer);
 }
 
 /*=========================================================
- * Tick Stop
+ * Stop
  *=========================================================*/
 
 void vrt_tick_stop(void)
 {
-    /*
-     * The actual hardware timer will be stopped by
-     * the architecture-specific implementation.
-     */
+    if (vrt_timer == NULL)
+    {
+        return;
+    }
+
+    timerAlarmDisable(vrt_timer);
+}
+
+/*=========================================================
+ * Tick Count
+ *=========================================================*/
+
+uint32_t vrt_tick_get_count(void)
+{
+    return vrt_tick_count;
 }
 
 /*=========================================================
  * Tick Handler
  *=========================================================*/
 
-/**
- * @brief Process one kernel tick.
- *
- * This function is called by the architecture-specific
- * timer interrupt handler.
- */
-void vrt_tick_increment(void)
+void vrt_tick_handler(void)
 {
-    vrt_scheduler_t *scheduler;
+    vrt_tick_count++;
 
-    /*
-     * Increment the global kernel tick count.
-     */
-    g_tick_count++;
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
 
-    /*
-     * Get the active scheduler.
-     */
-    scheduler = vrt_scheduler_get_instance();
-
-    if (scheduler == NULL)
+    if (scheduler != NULL)
     {
-        return;
+        vrt_scheduler_tick(scheduler);
     }
-
-    /*
-     * Give the scheduler an opportunity to perform
-     * its tick processing.
-     */
-    vrt_scheduler_tick(scheduler);
-}
-
-/*=========================================================
- * Tick Counter
- *=========================================================*/
-
-uint32_t vrt_tick_get_count(void)
-{
-    return g_tick_count;
 }

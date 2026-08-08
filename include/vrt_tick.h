@@ -8,57 +8,61 @@ extern "C"
 {
 #endif
 
-/*=========================================================
- * Tick Configuration
- *=========================================================*/
+    /*=========================================================
+     * Tick Configuration
+     *=========================================================*/
 
-/*
- * Default system tick frequency.
- *
- * 1000 Hz = 1 ms per tick.
- */
 #define VRT_TICK_RATE_HZ 1000U
+
+    /*=========================================================
+     * Tick Initialization
+     *=========================================================*/
+
+    /**
+     * @brief Initialize the VertexRT system tick.
+     *
+     * Configures the hardware timer used by VertexRT.
+     */
+    void vrt_tick_init(void);
 
     /*=========================================================
      * Tick Control
      *=========================================================*/
 
     /**
-     * @brief Initialize the system tick.
-     *
-     * Configures and initializes the hardware timer used
-     * by VertexRT for periodic scheduler ticks.
-     */
-    void vrt_tick_init(void);
-
-    /**
      * @brief Start the system tick.
      *
-     * Enables the hardware timer after the kernel has
-     * been initialized.
+     * Starts the hardware timer after the kernel
+     * has been initialized.
      */
     void vrt_tick_start(void);
 
     /**
      * @brief Stop the system tick.
      *
-     * Disables the hardware timer.
+     * Stops the hardware timer.
      */
     void vrt_tick_stop(void);
+
+    /*=========================================================
+     * Tick Information
+     *=========================================================*/
 
     /**
      * @brief Get the current system tick count.
      *
-     * @return Number of ticks since the scheduler started.
+     * @return Number of system ticks since the tick system
+     *         was started.
      */
     uint32_t vrt_tick_get_count(void);
 
     /**
      * @brief Process one system tick.
      *
-     * Called by the architecture-specific timer interrupt.
+     * This function is called by the hardware timer
+     * interrupt handler.
      */
-    void vrt_tick_increment(void);
+    void vrt_tick_handler(void);
 
 #ifdef __cplusplus
 }

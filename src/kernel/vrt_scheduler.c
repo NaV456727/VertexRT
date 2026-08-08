@@ -1,21 +1,18 @@
 #include "vrt_scheduler.h"
 #include "vrt_port.h"
+#include "vrt_config.h"
+
+#include <stddef.h>
 
 /*=========================================================
- * Private Variables
- *========================================================*/
+ * Global Scheduler
+ *=========================================================*/
 
-static vrt_scheduler_t *g_scheduler = NULL;
+static vrt_scheduler_t vrt_scheduler;
 
 /*=========================================================
- * Private Functions
- *========================================================*/
-
-static vrt_task_t *vrt_scheduler_select_next_task(
-    vrt_scheduler_t *scheduler);
-
-static vrt_task_t *vrt_scheduler_get_first_task(
-    vrt_scheduler_t *scheduler);
+ * Scheduler Initialization
+ *=========================================================*/
 
 void vrt_scheduler_init(vrt_scheduler_t *scheduler)
 {
@@ -33,28 +30,11 @@ void vrt_scheduler_init(vrt_scheduler_t *scheduler)
     scheduler->taskCount = 0;
 
     scheduler->running = false;
-
-    /* Set the global scheduler instance */
-    g_scheduler = scheduler;
 }
 
-static vrt_task_t *vrt_scheduler_get_first_task(
-    vrt_scheduler_t *scheduler)
-{
-    if (scheduler == NULL)
-    {
-        return NULL;
-    }
-
-    if (vrt_list_is_empty(&scheduler->readyQueue))
-    {
-        return NULL;
-    }
-
-    vrt_list_node_t *node = scheduler->readyQueue.head;
-
-    return (vrt_task_t *)node->owner;
-}
+/*=========================================================
+ * Add Task
+ *=========================================================*/
 
 bool vrt_scheduler_add_task(
     vrt_scheduler_t *scheduler,
@@ -65,38 +45,32 @@ bool vrt_scheduler_add_task(
         return false;
     }
 
-    task->state = VRT_TASK_READY;
-
-    task->node.next = NULL;
-    task->node.prev = NULL;
-
-    vrt_list_node_t *current =
-        scheduler->readyQueue.head;
-
-    while (current != NULL)
+    /*
+     * Do not exceed the configured task limit.
+     */
+    if (scheduler->taskCount >= VRT_MAX_TASKS)
     {
-        vrt_task_t *existingTask =
-            (vrt_task_t *)current->owner;
-
-        if (task->priority >
-            existingTask->priority)
-        {
-            if (!vrt_list_insert_before(
-                    &scheduler->readyQueue,
-                    current,
-                    &task->node))
-            {
-                return false;
-            }
-
-            scheduler->taskCount++;
-
-            return true;
-        }
-
-        current = current->next;
+        return false;
     }
 
+    /*
+     * Only READY tasks may enter the ready queue.
+     */
+    if (task->state != VRT_TASK_READY)
+    {
+        return false;
+    }
+
+    /*
+     * Assign task ID.
+     *
+     * IDs are assigned sequentially from zero.
+     */
+    task->id = scheduler->taskCount;
+
+    /*
+     * Insert task into the ready queue.
+     */
     if (!vrt_list_push_back(
             &scheduler->readyQueue,
             &task->node))
@@ -106,58 +80,22 @@ bool vrt_scheduler_add_task(
 
     scheduler->taskCount++;
 
+    /*
+     * If this is the first task, select it.
+     *
+     * It remains READY until the scheduler starts.
+     */
+    if (scheduler->currentTask == NULL)
+    {
+        scheduler->currentTask = task;
+    }
+
     return true;
 }
 
-static vrt_task_t *vrt_scheduler_select_next_task(
-    vrt_scheduler_t *scheduler)
-{
-    if (scheduler == NULL)
-    {
-        return NULL;
-    }
-
-    if (scheduler->currentTask == NULL)
-    {
-        return NULL;
-    }
-
-    vrt_list_node_t *nextNode =
-        scheduler->currentTask->node.next;
-
-    if (nextNode == NULL)
-    {
-        nextNode = scheduler->readyQueue.head;
-    }
-
-    return (vrt_task_t *)nextNode->owner;
-}
-
-void vrt_scheduler_start(vrt_scheduler_t *scheduler)
-{
-    if (scheduler == NULL)
-    {
-        return;
-    }
-
-    if (vrt_list_is_empty(&scheduler->readyQueue))
-    {
-        return;
-    }
-
-    scheduler->currentTask =
-        vrt_scheduler_get_first_task(scheduler);
-
-    if (scheduler->currentTask == NULL)
-    {
-        return;
-    }
-
-    scheduler->currentTask->state = VRT_TASK_RUNNING;
-    scheduler->running = true;
-
-    vrt_port_start_first_task();
-}
+/*=========================================================
+ * Scheduler Selection
+ *=========================================================*/
 
 void vrt_scheduler_schedule(
     vrt_scheduler_t *scheduler)
@@ -167,32 +105,130 @@ void vrt_scheduler_schedule(
         return;
     }
 
-    if (!scheduler->running)
+    /*
+     * Nothing to schedule.
+     */
+    if (vrt_list_is_empty(&scheduler->readyQueue))
     {
+        scheduler->currentTask = NULL;
         return;
     }
 
+    /*
+     * If there is no current task, select the first
+     * task in the ready queue.
+     */
     if (scheduler->currentTask == NULL)
     {
+        vrt_list_node_t *node =
+            scheduler->readyQueue.head;
+
+        if (node == NULL)
+        {
+            return;
+        }
+
+        vrt_task_t *next =
+            (vrt_task_t *)node->owner;
+
+        if (next == NULL)
+        {
+            return;
+        }
+
+        next->state = VRT_TASK_RUNNING;
+        scheduler->currentTask = next;
+
         return;
     }
 
-    vrt_task_t *nextTask =
-        vrt_scheduler_select_next_task(scheduler);
-
-    if (nextTask == NULL)
+    /*
+     * The current task must be running before it
+     * can be rotated.
+     */
+    if (scheduler->currentTask->state != VRT_TASK_RUNNING)
     {
+        scheduler->currentTask->state = VRT_TASK_RUNNING;
         return;
     }
 
-    vrt_task_t *current = scheduler->currentTask;
+    /*
+     * Move current task:
+     *
+     *     RUNNING -> READY
+     *
+     * and move it to the back of the ready queue.
+     */
+    vrt_task_t *current =
+        scheduler->currentTask;
 
     current->state = VRT_TASK_READY;
 
-    scheduler->currentTask = nextTask;
+    if (!vrt_list_remove(
+            &scheduler->readyQueue,
+            &current->node))
+    {
+        /*
+         * Queue corruption or inconsistent task state.
+         *
+         * Restore the state rather than continuing.
+         */
+        current->state = VRT_TASK_RUNNING;
+        return;
+    }
 
-    nextTask->state = VRT_TASK_RUNNING;
+    if (!vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node))
+    {
+        /*
+         * If reinsertion fails, keep the current task
+         * marked as running.
+         */
+        current->state = VRT_TASK_RUNNING;
+        return;
+    }
+
+    /*
+     * The task at the front of the queue is now the
+     * next task to run.
+     */
+    vrt_list_node_t *node =
+        scheduler->readyQueue.head;
+
+    if (node == NULL)
+    {
+        return;
+    }
+
+    vrt_task_t *next =
+        (vrt_task_t *)node->owner;
+
+    if (next == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Update task states.
+     */
+    next->state = VRT_TASK_RUNNING;
+
+    scheduler->currentTask = next;
+
+    /*
+     * IMPORTANT:
+     *
+     * At this stage we only select the next task.
+     *
+     * Actual CPU context switching will eventually
+     * happen here through the architecture port.
+     */
 }
+
+/*=========================================================
+ * Scheduler Tick
+ *=========================================================*/
 
 void vrt_scheduler_tick(
     vrt_scheduler_t *scheduler)
@@ -202,17 +238,85 @@ void vrt_scheduler_tick(
         return;
     }
 
+    /*
+     * Increment scheduler tick count.
+     */
+    scheduler->tickCount++;
+
+    /*
+     * Do not schedule until the scheduler has started.
+     */
     if (!scheduler->running)
     {
         return;
     }
 
-    scheduler->tickCount++;
-
+    /*
+     * Every system tick currently represents a
+     * scheduling opportunity.
+     */
     vrt_scheduler_schedule(scheduler);
 }
 
+/*=========================================================
+ * Scheduler Start
+ *=========================================================*/
+
+void vrt_scheduler_start(
+    vrt_scheduler_t *scheduler)
+{
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Scheduler is already running.
+     */
+    if (scheduler->running)
+    {
+        return;
+    }
+
+    /*
+     * There must be a task available.
+     */
+    if (scheduler->currentTask == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Mark scheduler as running.
+     */
+    scheduler->running = true;
+
+    /*
+     * The initially selected task becomes RUNNING.
+     */
+    scheduler->currentTask->state =
+        VRT_TASK_RUNNING;
+
+    /*
+     * Transfer execution to the architecture-specific
+     * first-task startup routine.
+     *
+     * This function should not return.
+     */
+    vrt_port_start_first_task();
+
+    /*
+     * We intentionally do not put any normal execution
+     * after this call. Once the port is implemented,
+     * control is transferred directly to the task.
+     */
+}
+
+/*=========================================================
+ * Scheduler Instance
+ *=========================================================*/
+
 vrt_scheduler_t *vrt_scheduler_get_instance(void)
 {
-    return g_scheduler;
+    return &vrt_scheduler;
 }
