@@ -2,38 +2,94 @@
 #include <string.h>
 
 /*=========================================================
- * Xtensa Initial Register Values
- *========================================================*/
+ * Xtensa Architecture Definitions
+ *=========================================================*/
 
+/*
+ * Initial processor status.
+ *
+ * PS_UM   = User mode
+ * PS_EXCM  = Exception mode
+ *
+ * This is the initial state used when entering a task.
+ */
 #define VRT_INITIAL_PS 0x00060020U
 
 /*=========================================================
- * Xtensa Initial Stack Frame
- *========================================================*/
+ * External Xtensa Functions
+ *=========================================================*/
+
+/*
+ * ESP32 Xtensa user exception exit dispatcher.
+ *
+ * The initial task frame is entered through the Xtensa
+ * exception-return mechanism, which eventually uses this
+ * dispatcher to transition into normal task execution.
+ */
+extern void _xt_user_exit(void);
+
+/*=========================================================
+ * Xtensa Exception Stack Frame
+ *=========================================================*/
+
+/*
+ * IMPORTANT:
+ *
+ * This layout follows the classic ESP32 Xtensa XtExcFrame
+ * ordering:
+ *
+ *     exit
+ *     pc
+ *     ps
+ *     a0
+ *     a1
+ *     a2
+ *     ...
+ *     a15
+ *     sar
+ *     exccause
+ *     excvaddr
+ *     lbeg
+ *     lend
+ *     lcount
+ *
+ * This ordering is important because the assembly port and
+ * the Xtensa exception machinery depend on fixed offsets.
+ */
 
 typedef struct vrt_stack_frame
 {
     /*=====================================================
-     * Exception Frame
-     *====================================================*/
+     * Exception Return
+     *=====================================================*/
 
-    /* Program Counter */
+    /*
+     * Exception exit / dispatch address.
+     */
+    uint32_t exit;
+
+    /*=====================================================
+     * Processor State
+     *=====================================================*/
+
+    /*
+     * Program counter to return to.
+     */
     uint32_t pc;
 
-    /* Processor Status */
+    /*
+     * Processor status register.
+     */
     uint32_t ps;
 
-    /* Return Address */
+    /*=====================================================
+     * General Purpose Registers
+     *=====================================================*/
+
     uint32_t a0;
-
-    /* Stack Pointer */
     uint32_t a1;
-
-    /* Function Arguments */
     uint32_t a2;
     uint32_t a3;
-
-    /* General Purpose Registers */
     uint32_t a4;
     uint32_t a5;
     uint32_t a6;
@@ -49,20 +105,30 @@ typedef struct vrt_stack_frame
 
     /*=====================================================
      * Special Registers
-     *====================================================*/
+     *=====================================================*/
 
-    /* Shift Amount Register */
     uint32_t sar;
 
-    /* Zero-Overhead Loop Registers */
+    /*=====================================================
+     * Exception Information
+     *=====================================================*/
+
+    uint32_t exccause;
+    uint32_t excvaddr;
+
+    /*=====================================================
+     * Zero-Overhead Loop Registers
+     *=====================================================*/
+
     uint32_t lbeg;
     uint32_t lend;
     uint32_t lcount;
 
-    /* Exception Exit Handler */
-    uint32_t exit;
-
 } vrt_stack_frame_t;
+
+/*=========================================================
+ * Stack Initialization
+ *=========================================================*/
 
 uint32_t *vrt_port_stack_init(
     uint32_t *stackTop,
@@ -72,20 +138,28 @@ uint32_t *vrt_port_stack_init(
     uint32_t *alignedStack;
     vrt_stack_frame_t *frame;
 
-    /*
-     * Align stack to a 16-byte boundary.
-     */
     uintptr_t stackAddress;
 
-    stackAddress = VRT_ALIGN_DOWN(
-        ((uintptr_t)stackTop - sizeof(vrt_stack_frame_t)),
-        VRT_STACK_ALIGNMENT);
+    /*=====================================================
+     * Calculate Initial Frame Address
+     *=====================================================*/
+
+    /*
+     * Reserve space for the initial exception frame and
+     * align the resulting address to 16 bytes.
+     */
+    stackAddress =
+        VRT_ALIGN_DOWN(
+            ((uintptr_t)stackTop -
+             sizeof(vrt_stack_frame_t)),
+            VRT_STACK_ALIGNMENT);
 
     alignedStack = (uint32_t *)stackAddress;
 
-    /*
-     * Clear the initial stack frame.
-     */
+    /*=====================================================
+     * Clear Initial Frame
+     *=====================================================*/
+
     memset(
         alignedStack,
         0,
@@ -93,29 +167,74 @@ uint32_t *vrt_port_stack_init(
 
     frame = (vrt_stack_frame_t *)alignedStack;
 
+    /*=====================================================
+     * Initialize Exception Entry
+     *=====================================================*/
+
     /*
-     * Initialize CPU registers.
+     * When the initial context is restored, the Xtensa
+     * exception machinery uses this dispatcher to leave
+     * exception context and enter the task.
      */
+    frame->exit =
+        (uintptr_t)_xt_user_exit;
 
-    /* Program Counter */
-    frame->pc = (uintptr_t)entry;
+    /*=====================================================
+     * Initialize Program Counter
+     *=====================================================*/
 
-    /* Initial Processor Status */
-    frame->ps = VRT_INITIAL_PS;
+    /*
+     * The task begins execution at its entry function.
+     */
+    frame->pc =
+        (uintptr_t)entry;
 
-    /* Return Address */
+    /*=====================================================
+     * Initialize Processor Status
+     *=====================================================*/
+
+    frame->ps =
+        VRT_INITIAL_PS;
+
+    /*=====================================================
+     * Initialize Return Address
+     *=====================================================*/
+
+    /*
+     * There is no caller for the initial task context.
+     *
+     * Setting A0 to zero also terminates the backtrace
+     * cleanly when debugging.
+     */
     frame->a0 = 0;
 
-    /* Initial Stack Pointer */
-    frame->a1 =
-        (uintptr_t)(alignedStack + (sizeof(vrt_stack_frame_t) / sizeof(uint32_t)));
-
-    /* Task Argument */
-    frame->a2 = (uintptr_t)argument;
+    /*=====================================================
+     * Initialize Stack Pointer
+     *=====================================================*/
 
     /*
-     * Initialize remaining registers.
+     * A1 must point to the physical top of the initial
+     * exception frame.
      */
+    frame->a1 =
+        (uintptr_t)(alignedStack +
+                    (sizeof(vrt_stack_frame_t) /
+                     sizeof(uint32_t)));
+
+    /*=====================================================
+     * Initialize Task Argument
+     *=====================================================*/
+
+    /*
+     * For the ESP32 call0 ABI, the first function argument
+     * is passed through A2.
+     */
+    frame->a2 =
+        (uintptr_t)argument;
+
+    /*=====================================================
+     * Initialize Remaining Registers
+     *=====================================================*/
 
     frame->a3 = 0;
     frame->a4 = 0;
@@ -131,20 +250,34 @@ uint32_t *vrt_port_stack_init(
     frame->a14 = 0;
     frame->a15 = 0;
 
-    /* Special Registers */
+    /*=====================================================
+     * Initialize Special Registers
+     *=====================================================*/
+
     frame->sar = 0;
+
+    /*=====================================================
+     * Initialize Exception Information
+     *=====================================================*/
+
+    /*
+     * These values are irrelevant for a freshly-created
+     * task because no exception has occurred yet.
+     */
+    frame->exccause = 0;
+    frame->excvaddr = 0;
+
+    /*=====================================================
+     * Initialize Loop Registers
+     *=====================================================*/
+
     frame->lbeg = 0;
     frame->lend = 0;
     frame->lcount = 0;
 
-    /*
-     * Exception exit handler.
-     *
-     * TODO:
-     * Replace with the architecture-specific
-     * context restore routine.
-     */
-    frame->exit = 0;
+    /*=====================================================
+     * Return Initial Stack Pointer
+     *=====================================================*/
 
     return alignedStack;
 }
