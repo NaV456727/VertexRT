@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 /*=========================================================
- * Semaphore Initialization
+ * Binary Semaphore
  *=========================================================*/
 
 void vrt_sem_init(
@@ -16,16 +16,9 @@ void vrt_sem_init(
         return;
     }
 
-    /*
-     * Binary semaphore can only contain
-     * 0 or 1.
-     */
     sem->count =
         initialState ? 1U : 0U;
 
-    /*
-     * No tasks are waiting initially.
-     */
     vrt_list_init(
         &sem->waitQueue);
 }
@@ -59,8 +52,7 @@ void vrt_sem_wait(
     }
 
     /*
-     * The idle task must never block on
-     * a synchronization primitive.
+     * Idle task must never block.
      */
     if (current == scheduler->idleTask)
     {
@@ -68,9 +60,7 @@ void vrt_sem_wait(
     }
 
     /*
-     * Semaphore is available.
-     *
-     * Acquire it immediately.
+     * Semaphore available.
      */
     if (sem->count > 0U)
     {
@@ -87,16 +77,16 @@ void vrt_sem_wait(
         VRT_TASK_BLOCKED;
 
     /*
-     * Put the task into the semaphore's
-     * waiting queue.
+     * Put the task on the semaphore wait queue.
      */
     if (!vrt_list_push_back(
             &sem->waitQueue,
             &current->waitNode))
     {
         /*
-         * If insertion failed, restore
-         * the task to READY.
+         * Failed to queue the task.
+         *
+         * Restore READY state.
          */
         current->state =
             VRT_TASK_READY;
@@ -105,16 +95,16 @@ void vrt_sem_wait(
     }
 
     /*
-     * The current task is no longer runnable.
+     * Current task is no longer runnable.
      */
     scheduler->currentTask = NULL;
 
     /*
-     * Select another runnable task.
+     * Select another task.
      *
-     * This only changes scheduler state
-     * for now. The actual context switch
-     * will happen through the port layer.
+     * Actual CPU switching will be performed
+     * by the port layer once context switching
+     * is connected.
      */
     vrt_scheduler_schedule(
         scheduler);
@@ -132,9 +122,16 @@ void vrt_sem_signal(
         return;
     }
 
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
     /*
-     * If there are blocked tasks waiting for
-     * this semaphore, wake the first one.
+     * Wake the first waiting task.
      */
     if (!vrt_list_is_empty(
             &sem->waitQueue))
@@ -156,29 +153,30 @@ void vrt_sem_signal(
         }
 
         /*
-         * Remove task from semaphore wait queue.
+         * Remove from semaphore wait queue.
          */
         vrt_list_remove(
             &sem->waitQueue,
             &task->waitNode);
 
         /*
-         * Make task runnable again.
+         * Put task back into READY state.
          */
         task->state =
             VRT_TASK_READY;
 
         /*
-         * Put it back into the scheduler
-         * ready queue.
+         * Return task to scheduler ready queue.
          */
         if (!vrt_list_push_back(
-                &vrt_scheduler_get_instance()->readyQueue,
+                &scheduler->readyQueue,
                 &task->node))
         {
             /*
-             * If the task could not be returned to the
-             * ready queue, keep it blocked.
+             * Ready queue insertion failed.
+             *
+             * Restore BLOCKED state and put the
+             * task back onto the semaphore queue.
              */
             task->state =
                 VRT_TASK_BLOCKED;
@@ -190,13 +188,239 @@ void vrt_sem_signal(
             return;
         }
 
+        /*
+         * Semaphore ownership is transferred directly
+         * to the woken task.
+         *
+         * Therefore count remains zero.
+         */
         return;
     }
 
     /*
      * Nobody is waiting.
      *
-     * Make semaphore available.
+     * Make the semaphore available.
      */
     sem->count = 1U;
+}
+
+/*=========================================================
+ * Mutex Initialization
+ *=========================================================*/
+
+void vrt_mutex_init(
+    vrt_mutex_t *mutex)
+{
+    if (mutex == NULL)
+    {
+        return;
+    }
+
+    mutex->locked = false;
+    mutex->owner = NULL;
+
+    vrt_list_init(
+        &mutex->waitQueue);
+}
+
+/*=========================================================
+ * Mutex Lock
+ *=========================================================*/
+
+void vrt_mutex_lock(
+    vrt_mutex_t *mutex)
+{
+    if (mutex == NULL)
+    {
+        return;
+    }
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Idle task cannot own a mutex.
+     */
+    if (current == scheduler->idleTask)
+    {
+        return;
+    }
+
+    /*
+     * Mutex is free.
+     */
+    if (!mutex->locked)
+    {
+        mutex->locked = true;
+        mutex->owner = current;
+
+        return;
+    }
+
+    /*
+     * Current task already owns this mutex.
+     *
+     * We are not implementing recursive mutexes yet.
+     */
+    if (mutex->owner == current)
+    {
+        return;
+    }
+
+    /*
+     * Mutex is owned by another task.
+     *
+     * Block current task.
+     */
+    current->state =
+        VRT_TASK_BLOCKED;
+
+    /*
+     * Add task to mutex wait queue.
+     */
+    if (!vrt_list_push_back(
+            &mutex->waitQueue,
+            &current->waitNode))
+    {
+        current->state =
+            VRT_TASK_READY;
+
+        return;
+    }
+
+    /*
+     * Current task is no longer running.
+     */
+    scheduler->currentTask = NULL;
+
+    /*
+     * Select another task.
+     */
+    vrt_scheduler_schedule(
+        scheduler);
+}
+
+/*=========================================================
+ * Mutex Unlock
+ *=========================================================*/
+
+void vrt_mutex_unlock(
+    vrt_mutex_t *mutex)
+{
+    if (mutex == NULL)
+    {
+        return;
+    }
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Only the owner may unlock the mutex.
+     */
+    if (mutex->owner != current)
+    {
+        return;
+    }
+
+    /*
+     * If another task is waiting, transfer
+     * ownership directly to it.
+     */
+    if (!vrt_list_is_empty(
+            &mutex->waitQueue))
+    {
+        vrt_list_node_t *node =
+            mutex->waitQueue.head;
+
+        if (node == NULL)
+        {
+            return;
+        }
+
+        vrt_task_t *next =
+            (vrt_task_t *)node->owner;
+
+        if (next == NULL)
+        {
+            return;
+        }
+
+        /*
+         * Remove from mutex wait queue.
+         */
+        vrt_list_remove(
+            &mutex->waitQueue,
+            &next->waitNode);
+
+        /*
+         * Return task to READY state.
+         */
+        next->state =
+            VRT_TASK_READY;
+
+        /*
+         * Return task to scheduler queue.
+         */
+        if (!vrt_list_push_back(
+                &scheduler->readyQueue,
+                &next->node))
+        {
+            /*
+             * Failed to make task runnable.
+             * Keep it blocked and preserve ownership.
+             */
+            next->state =
+                VRT_TASK_BLOCKED;
+
+            vrt_list_push_back(
+                &mutex->waitQueue,
+                &next->waitNode);
+
+            return;
+        }
+
+        /*
+         * Transfer ownership directly.
+         */
+        mutex->owner = next;
+        mutex->locked = true;
+
+        return;
+    }
+
+    /*
+     * Nobody is waiting.
+     *
+     * Completely release mutex.
+     */
+    mutex->owner = NULL;
+    mutex->locked = false;
 }

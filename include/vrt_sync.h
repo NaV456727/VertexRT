@@ -20,39 +20,44 @@ typedef struct
 } vrt_sem_t;
 
 /*=========================================================
- * Semaphore API
+ * Binary Semaphore API
  *=========================================================*/
 
-/*
- * Initialize a binary semaphore.
- *
- * initialState:
- *
- *     true  -> available
- *     false -> unavailable
- */
 void vrt_sem_init(
     vrt_sem_t *sem,
     bool initialState);
 
-/*
- * Wait for the semaphore.
- *
- * If the semaphore is available, the current task
- * acquires it immediately.
- *
- * Otherwise the current task becomes BLOCKED.
- */
 void vrt_sem_wait(
     vrt_sem_t *sem);
 
-/*
- * Release the semaphore.
- *
- * If another task is waiting, that task is woken.
- * Otherwise the semaphore becomes available.
- */
 void vrt_sem_signal(
     vrt_sem_t *sem);
+
+/*=========================================================
+ * Mutex
+ *=========================================================*/
+
+typedef struct
+{
+    bool locked;
+
+    vrt_task_t *owner;
+
+    vrt_list_t waitQueue;
+
+} vrt_mutex_t;
+
+/*=========================================================
+ * Mutex API
+ *=========================================================*/
+
+void vrt_mutex_init(
+    vrt_mutex_t *mutex);
+
+void vrt_mutex_lock(
+    vrt_mutex_t *mutex);
+
+void vrt_mutex_unlock(
+    vrt_mutex_t *mutex);
 
 #endif

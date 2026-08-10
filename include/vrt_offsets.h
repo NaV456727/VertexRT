@@ -30,41 +30,40 @@
 #define VRT_TASK_SP_OFFSET 48
 
 /*=========================================================
- * Stack Frame Offsets
+ * Initial Task Frame Offsets
  *=========================================================*/
 
-#define VRT_FRAME_PC 0
-#define VRT_FRAME_PS 4
+/*
+ * Must match vrt_stack_frame_t in vrt_port.c.
+ */
 
-#define VRT_FRAME_A0 8
-#define VRT_FRAME_A1 12
-#define VRT_FRAME_A2 16
-#define VRT_FRAME_A3 20
-#define VRT_FRAME_A4 24
-#define VRT_FRAME_A5 28
-#define VRT_FRAME_A6 32
-#define VRT_FRAME_A7 36
-#define VRT_FRAME_A8 40
-#define VRT_FRAME_A9 44
-#define VRT_FRAME_A10 48
-#define VRT_FRAME_A11 52
-#define VRT_FRAME_A12 56
-#define VRT_FRAME_A13 60
-#define VRT_FRAME_A14 64
-#define VRT_FRAME_A15 68
+#define VRT_FRAME_A0 0
+#define VRT_FRAME_A1 4
+#define VRT_FRAME_A2 8
+#define VRT_FRAME_A3 12
+#define VRT_FRAME_A4 16
+#define VRT_FRAME_A5 20
+#define VRT_FRAME_A6 24
+#define VRT_FRAME_A7 28
+#define VRT_FRAME_A8 32
+#define VRT_FRAME_A9 36
+#define VRT_FRAME_A10 40
+#define VRT_FRAME_A11 44
+#define VRT_FRAME_A12 48
+#define VRT_FRAME_A13 52
+#define VRT_FRAME_A14 56
+#define VRT_FRAME_A15 60
 
-#define VRT_FRAME_SAR 72
+#define VRT_FRAME_PS 64
+#define VRT_FRAME_SAR 68
 
-#define VRT_FRAME_EXCCAUSE 76
-#define VRT_FRAME_EXCVADDR 80
+#define VRT_FRAME_LBEG 72
+#define VRT_FRAME_LEND 76
+#define VRT_FRAME_LCOUNT 80
 
-#define VRT_FRAME_LBEG 84
-#define VRT_FRAME_LEND 88
-#define VRT_FRAME_LCOUNT 92
+#define VRT_FRAME_PC 84
 
-#define VRT_FRAME_EXIT 96
-
-#define VRT_FRAME_SIZE 100
+#define VRT_FRAME_SIZE 88
 
 #else /* C compiler */
 
