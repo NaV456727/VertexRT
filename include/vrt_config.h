@@ -2,6 +2,8 @@
 #define VRT_CONFIG_H
 
 #define VRT_MAX_TASKS 8
+#define VRT_MAX_TASKS_TOTAL (VRT_MAX_TASKS + 1)
+
 #define VRT_STACK_SIZE 1024
 #define VRT_TASK_NAME_LENGTH 16
 

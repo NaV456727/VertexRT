@@ -29,6 +29,11 @@ void vrt_task_init(
     uint32_t stackSize,
     const char *name)
 {
+
+    task->waitNode.owner = task;
+    task->waitNode.next = NULL;
+    task->waitNode.prev = NULL;
+
     if (task == NULL ||
         entry == NULL ||
         stackStart == NULL ||
@@ -98,6 +103,12 @@ void vrt_task_init(
         task->entry,
         task->argument);
 
+    if (task->sp == NULL)
+    {
+        task->state = VRT_TASK_TERMINATED;
+        return;
+    }
+
     /*-----------------------------------------------------
      * Scheduler List Node
      *-----------------------------------------------------*/
@@ -139,4 +150,134 @@ void vrt_task_yield(void)
      * performed by the architecture-specific port layer.
      */
     vrt_scheduler_schedule(scheduler);
+}
+
+void vrt_task_exit(void)
+{
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    vrt_task_t *task =
+        scheduler->currentTask;
+
+    if (task == NULL)
+    {
+        return;
+    }
+
+    if (task == scheduler->idleTask)
+    {
+        return;
+    }
+
+    /*
+     * The task is no longer runnable.
+     */
+    task->state = VRT_TASK_TERMINATED;
+
+    /*
+     * Remove it from the ready queue.
+     */
+    vrt_list_remove(
+        &scheduler->readyQueue,
+        &task->node);
+
+    /*
+     * This task is no longer an active task.
+     */
+    if (scheduler->taskCount > 0)
+    {
+        scheduler->taskCount--;
+    }
+
+    /*
+     * There is currently no running task.
+     */
+    scheduler->currentTask = NULL;
+
+    /*
+     * Ask the scheduler to select another task.
+     */
+    vrt_scheduler_schedule(scheduler);
+}
+
+void vrt_task_suspend(vrt_task_t *task)
+{
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL || task == NULL)
+    {
+        return;
+    }
+
+    if (task->state != VRT_TASK_READY &&
+        task->state != VRT_TASK_RUNNING)
+    {
+        return;
+    }
+
+    /*
+     * Remove the task from the ready queue.
+     */
+    vrt_list_remove(
+        &scheduler->readyQueue,
+        &task->node);
+
+    /*
+     * Mark it as suspended.
+     */
+    task->state = VRT_TASK_SUSPENDED;
+
+    /*
+     * If the current task suspended itself,
+     * there is no longer a running task.
+     */
+    if (scheduler->currentTask == task &&
+        task->state == VRT_TASK_SUSPENDED)
+    {
+        scheduler->currentTask = NULL;
+
+        vrt_scheduler_schedule(scheduler);
+    }
+}
+
+void vrt_task_resume(vrt_task_t *task)
+{
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL || task == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Only suspended tasks can be resumed.
+     */
+    if (task->state != VRT_TASK_SUSPENDED)
+    {
+        return;
+    }
+
+    /*
+     * Put it back into the ready queue first.
+     */
+    if (!vrt_list_push_back(
+            &scheduler->readyQueue,
+            &task->node))
+    {
+        return;
+    }
+
+    /*
+     * Only mark the task READY after
+     * successful insertion.
+     */
+    task->state = VRT_TASK_READY;
 }
