@@ -1,100 +1,63 @@
 #include "vrt_port.h"
+#include "vrt_port_frame.h"
 
 #include <stdint.h>
 #include <string.h>
 
-/*=========================================================
- * Xtensa Architecture Definitions
- *=========================================================*/
-
 /*
- * Initial processor status.
+ * Xtensa PS bits used by the FreeRTOS-style initial
+ * task context.
  *
- * This value is suitable for starting a normal task
- * context on the classic ESP32 Xtensa core.
- */
-#define VRT_INITIAL_PS 0x00060020U
-
-/*=========================================================
- * Initial Task Stack Frame
- *=========================================================*/
-
-/*
- * This is VertexRT's software-defined initial context.
+ * PS_UM       = user mode
+ * PS_EXCM     = exception mode
+ * PS_WOE      = window overflow enable
+ * PS_CALLINC  = pretend the task was entered by CALL4
  *
- * IMPORTANT:
+ * For a normal windowed Xtensa task:
  *
- * This frame is used by our own first-task startup
- * assembly. It is NOT pretending to be an Xtensa
- * exception frame.
+ *     PS = PS_UM | PS_EXCM | PS_WOE | PS_CALLINC(1)
  *
- * Keeping this distinction makes the port much easier
- * to reason about.
+ * Which is:
+ *
+ *     0x00050020
  */
 
-typedef struct vrt_stack_frame
-{
-    uint32_t a0;
-    uint32_t a1;
-    uint32_t a2;
-    uint32_t a3;
-    uint32_t a4;
-    uint32_t a5;
-    uint32_t a6;
-    uint32_t a7;
-    uint32_t a8;
-    uint32_t a9;
-    uint32_t a10;
-    uint32_t a11;
-    uint32_t a12;
-    uint32_t a13;
-    uint32_t a14;
-    uint32_t a15;
+#define VRT_PS_UM 0x00000020U
+#define VRT_PS_EXCM 0x00000010U
+#define VRT_PS_WOE 0x00040000U
+#define VRT_PS_CALLINC_1 0x00010000U
 
-    uint32_t ps;
-    uint32_t sar;
-
-    uint32_t lbeg;
-    uint32_t lend;
-    uint32_t lcount;
-
-    uint32_t pc;
-
-} vrt_stack_frame_t;
-
-/*=========================================================
- * Stack Initialization
- *=========================================================*/
+#define VRT_INITIAL_PS \
+    (VRT_PS_UM | VRT_PS_EXCM | VRT_PS_WOE | VRT_PS_CALLINC_1)
 
 uint32_t *vrt_port_stack_init(
     uint32_t *stackTop,
     vrt_task_function_t entry,
     void *argument)
 {
-    if (stackTop == NULL ||
-        entry == NULL)
+    if (stackTop == NULL || entry == NULL)
     {
         return NULL;
     }
 
     /*
-     * Reserve space for our initial CPU context.
+     * Stack grows downward.
+     *
+     * The frame must be 16-byte aligned.
      */
-    uintptr_t address =
-        (uintptr_t)stackTop -
-        sizeof(vrt_stack_frame_t);
+    uintptr_t top =
+        (uintptr_t)stackTop;
 
-    /*
-     * ESP32 ABI requires stack alignment.
-     */
-    address &=
-        ~((uintptr_t)VRT_STACK_ALIGNMENT - 1U);
+    uintptr_t address =
+        top - sizeof(vrt_stack_frame_t);
+
+    address &= ~((uintptr_t)VRT_STACK_ALIGNMENT - 1U);
 
     vrt_stack_frame_t *frame =
         (vrt_stack_frame_t *)address;
 
     /*
-     * Start with a clean frame.
+     * Clear the entire initial context.
      */
     memset(
         frame,
@@ -102,7 +65,7 @@ uint32_t *vrt_port_stack_init(
         sizeof(vrt_stack_frame_t));
 
     /*=====================================================
-     * Initial CPU State
+     * Initial execution state
      *=====================================================*/
 
     /*
@@ -112,68 +75,79 @@ uint32_t *vrt_port_stack_init(
         (uint32_t)(uintptr_t)entry;
 
     /*
-     * Initial processor state.
+     * Initial processor status.
      */
     frame->ps =
         VRT_INITIAL_PS;
 
-    /*
-     * A0 is the return address.
-     *
-     * A task should never return normally.
-     * vrt_task_exit() will eventually handle this.
-     */
-    frame->a0 = 0;
+    /*=====================================================
+     * Stack registers
+     *=====================================================*/
 
     /*
-     * A1 is the stack pointer.
+     * A0 = 0
      *
-     * Point it above the initial frame.
+     * This makes the initial task appear at the bottom
+     * of the call chain.
+     */
+    frame->a0 = 0U;
+
+    /*
+     * A1 = physical top of the frame.
      */
     frame->a1 =
         (uint32_t)(address +
                    sizeof(vrt_stack_frame_t));
 
     /*
-     * First function argument.
+     * A2 = task argument.
      *
-     * VertexRT task functions use:
-     *
-     *     void task(void *argument)
-     *
-     * so the argument is placed in A2.
+     * This matches the normal Xtensa C calling convention
+     * for the task entry function.
      */
     frame->a2 =
         (uint32_t)(uintptr_t)argument;
 
     /*
-     * Remaining registers start cleared.
+     * Remaining registers start at zero.
      */
-    frame->a3 = 0;
-    frame->a4 = 0;
-    frame->a5 = 0;
-    frame->a6 = 0;
-    frame->a7 = 0;
-    frame->a8 = 0;
-    frame->a9 = 0;
-    frame->a10 = 0;
-    frame->a11 = 0;
-    frame->a12 = 0;
-    frame->a13 = 0;
-    frame->a14 = 0;
-    frame->a15 = 0;
+    frame->a3 = 0U;
+    frame->a4 = 0U;
+    frame->a5 = 0U;
+    frame->a6 = 0U;
+    frame->a7 = 0U;
+    frame->a8 = 0U;
+    frame->a9 = 0U;
+    frame->a10 = 0U;
+    frame->a11 = 0U;
+    frame->a12 = 0U;
+    frame->a13 = 0U;
+    frame->a14 = 0U;
+    frame->a15 = 0U;
+
+    /*=====================================================
+     * Special registers
+     *=====================================================*/
+
+    frame->sar = 0U;
+
+    frame->exccause = 0U;
+    frame->excvaddr = 0U;
+
+    frame->lbeg = 0U;
+    frame->lend = 0U;
+    frame->lcount = 0U;
+
+    /*=====================================================
+     * Window spill/fill temporary storage
+     *=====================================================*/
+
+    frame->tmp0 = 0U;
+    frame->tmp1 = 0U;
+    frame->tmp2 = 0U;
 
     /*
-     * Special registers.
-     */
-    frame->sar = 0;
-
-    frame->lbeg = 0;
-    frame->lend = 0;
-    frame->lcount = 0;
-
-    /*
-     * Return the address of the saved context.
+     * Return the beginning of the saved context.
      */
     return (uint32_t *)frame;
 }

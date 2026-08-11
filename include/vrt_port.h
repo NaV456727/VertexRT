@@ -11,29 +11,31 @@ extern "C"
 
 /*=========================================================
  * Stack Configuration
- *========================================================*/
+ *=========================================================*/
 
-/* ESP32 stacks must be 16-byte aligned */
+/*
+ * ESP32 Xtensa stack alignment.
+ */
 #define VRT_STACK_ALIGNMENT 16U
 
-/* Align an address downwards */
+/*
+ * Align an address downwards.
+ */
 #define VRT_ALIGN_DOWN(addr, alignment) \
     (((addr)) & ~((alignment) - 1U))
 
     /*=========================================================
      * Stack Initialization
-     *========================================================*/
+     *=========================================================*/
 
     /**
-     * @brief Initialize a task's stack.
-     *
-     * Creates the initial CPU context for a new task.
+     * @brief Initialize a task's initial CPU context.
      *
      * @param stackTop Pointer to the top of the task stack.
      * @param entry Task entry function.
      * @param argument Task argument.
      *
-     * @return Pointer to the initialized stack pointer.
+     * @return Initial saved stack pointer.
      */
     uint32_t *vrt_port_stack_init(
         uint32_t *stackTop,
@@ -42,17 +44,18 @@ extern "C"
 
     /*=========================================================
      * Context Switching
-     *========================================================*/
+     *=========================================================*/
 
     /**
-     * @brief Starts execution of the first task.
+     * @brief Start execution of the first task.
      *
-     * This function never returns.
+     * This function does not return.
      */
     void vrt_port_start_first_task(void);
 
     /**
-     * @brief Performs a context switch.
+     * @brief Switch from the current task to the task
+     * selected by the scheduler.
      */
     void vrt_port_switch_context(void);
 
