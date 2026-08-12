@@ -29,89 +29,33 @@ void vrt_task_init(
     uint32_t stackSize,
     const char *name)
 {
-    /*
-     * Validate arguments before accessing task.
-     */
-    if (task == NULL ||
-        entry == NULL ||
-        stackStart == NULL ||
-        stackSize == 0U ||
-        name == NULL)
+    if (task == NULL || entry == NULL || stackStart == NULL ||
+        stackSize == 0U || name == NULL)
     {
         return;
     }
-
-    /*-----------------------------------------------------
-     * Initialize wait-list node
-     *-----------------------------------------------------*/
 
     task->waitNode.owner = task;
     task->waitNode.next = NULL;
     task->waitNode.prev = NULL;
 
-    /*-----------------------------------------------------
-     * Task Identity
-     *-----------------------------------------------------*/
-
     task->id = g_next_task_id++;
-
-    /*
-     * Prevent ID 0 from ever being assigned if the
-     * counter wraps around.
-     */
     if (g_next_task_id == 0U)
     {
         g_next_task_id = 1U;
     }
 
-    /*-----------------------------------------------------
-     * Task Entry
-     *-----------------------------------------------------*/
-
     task->entry = entry;
     task->argument = argument;
-
-    /*-----------------------------------------------------
-     * Scheduling Information
-     *-----------------------------------------------------*/
-
     task->priority = priority;
     task->state = VRT_TASK_READY;
-
-    /*-----------------------------------------------------
-     * Stack Information
-     *-----------------------------------------------------*/
+    task->isIdle = false;
 
     task->stackStart = stackStart;
     task->stackSize = stackSize;
-
-    /*
-     * stackSize is expressed in uint32_t words.
-     *
-     * Example:
-     *
-     *     uint32_t stack[1024];
-     *
-     *     stackStart = stack
-     *     stackSize  = 1024
-     *
-     * stackEnd points one element past the usable
-     * stack memory.
-     */
     task->stackEnd = stackStart + stackSize;
 
-    /*-----------------------------------------------------
-     * Initial CPU Context
-     *-----------------------------------------------------*/
-
-    /*
-     * Create the initial architecture-specific
-     * CPU context for this task.
-     */
-    task->sp = vrt_port_stack_init(
-        task->stackEnd,
-        task->entry,
-        task->argument);
+    task->sp = vrt_port_stack_init(task->stackEnd, task->entry, task->argument);
 
     if (task->sp == NULL)
     {
@@ -119,23 +63,11 @@ void vrt_task_init(
         return;
     }
 
-    /*-----------------------------------------------------
-     * Scheduler List Node
-     *-----------------------------------------------------*/
-
     task->node.owner = task;
     task->node.next = NULL;
     task->node.prev = NULL;
 
-    /*-----------------------------------------------------
-     * Task Name
-     *-----------------------------------------------------*/
-
-    strncpy(
-        task->name,
-        name,
-        VRT_TASK_NAME_LENGTH - 1U);
-
+    strncpy(task->name, name, VRT_TASK_NAME_LENGTH - 1U);
     task->name[VRT_TASK_NAME_LENGTH - 1U] = '\0';
 }
 
@@ -148,32 +80,38 @@ void vrt_task_yield(void)
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    if (scheduler == NULL)
+    if (scheduler == NULL || !scheduler->running)
+    {
+        return;
+    }
+
+    vrt_task_t *self =
+        scheduler->currentTask;
+
+    if (self == NULL)
     {
         return;
     }
 
     /*
-     * Do not attempt a context switch before
-     * the scheduler has started.
-     */
-    if (!scheduler->running)
-    {
-        return;
-    }
-
-    /*
-     * The architecture-specific context switch
-     * performs the complete operation:
+     * Scheduler selection happens in C.
      *
-     * 1. Save current CPU context.
-     * 2. Save currentTask->sp.
-     * 3. Ask scheduler to select the next task.
-     * 4. Load nextTask->sp.
-     * 5. Restore next CPU context.
-     * 6. Resume execution.
+     * The architecture layer then saves self->sp and
+     * restores scheduler->currentTask->sp.
      */
-    vrt_port_switch_context();
+    vrt_scheduler_schedule(scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    if (next == NULL || next == self)
+    {
+        return;
+    }
+
+    vrt_port_switch_context(
+        &self->sp,
+        next->sp);
 }
 
 /*=========================================================
@@ -193,53 +131,55 @@ void vrt_task_exit(void)
     vrt_task_t *task =
         scheduler->currentTask;
 
-    if (task == NULL)
+    if (task == NULL || task == scheduler->idleTask)
     {
         return;
     }
 
-    /*
-     * The idle task must never terminate.
-     */
-    if (task == scheduler->idleTask)
-    {
-        return;
-    }
+    task->state =
+        VRT_TASK_TERMINATED;
 
-    /*
-     * The task is no longer runnable.
-     */
-    task->state = VRT_TASK_TERMINATED;
-
-    /*
-     * Remove the task from the ready queue.
-     */
     vrt_list_remove(
         &scheduler->readyQueue,
         &task->node);
 
-    /*
-     * This task is no longer an active user task.
-     */
     if (scheduler->taskCount > 0U)
     {
         scheduler->taskCount--;
     }
 
     /*
-     * There is currently no running task.
+     * The current task is no longer runnable.
      */
     scheduler->currentTask = NULL;
 
     /*
      * Select another runnable task.
      *
-     * NOTE:
-     *
-     * Full context switching for task termination
-     * will be handled separately.
+     * If none exists, scheduler_schedule() selects idle.
      */
     vrt_scheduler_schedule(scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    if (next == NULL)
+    {
+        /*
+         * There is nowhere valid to go.
+         * This should never happen because the idle task exists.
+         */
+        for (;;)
+        {
+        }
+    }
+
+    /*
+     * Do NOT save the terminating task's context.
+     *
+     * Directly restore the next task.
+     */
+    vrt_port_restore_context(next->sp);
 }
 
 /*=========================================================
@@ -256,39 +196,37 @@ void vrt_task_suspend(vrt_task_t *task)
         return;
     }
 
-    /*
-     * Only READY or RUNNING tasks can be suspended.
-     */
     if (task->state != VRT_TASK_READY &&
         task->state != VRT_TASK_RUNNING)
     {
         return;
     }
 
-    /*
-     * Remove the task from the ready queue.
-     */
-    vrt_list_remove(
-        &scheduler->readyQueue,
-        &task->node);
+    if (task != scheduler->currentTask)
+    {
+        vrt_list_remove(
+            &scheduler->readyQueue,
+            &task->node);
+    }
 
-    /*
-     * Mark task as suspended.
-     */
     task->state = VRT_TASK_SUSPENDED;
 
-    /*
-     * If the current task suspended itself,
-     * select another task.
-     *
-     * Full context switching for self-suspension
-     * will be handled separately.
-     */
     if (scheduler->currentTask == task)
     {
         scheduler->currentTask = NULL;
-
         vrt_scheduler_schedule(scheduler);
+
+        vrt_task_t *next =
+            scheduler->currentTask;
+
+        if (next != NULL)
+        {
+            vrt_port_restore_context(next->sp);
+        }
+
+        for (;;)
+        {
+        }
     }
 }
 
@@ -298,35 +236,19 @@ void vrt_task_suspend(vrt_task_t *task)
 
 void vrt_task_resume(vrt_task_t *task)
 {
-    vrt_scheduler_t *scheduler =
-        vrt_scheduler_get_instance();
+    vrt_scheduler_t *scheduler = vrt_scheduler_get_instance();
 
     if (scheduler == NULL || task == NULL)
     {
         return;
     }
-
-    /*
-     * Only suspended tasks can be resumed.
-     */
     if (task->state != VRT_TASK_SUSPENDED)
     {
         return;
     }
-
-    /*
-     * Put the task back into the ready queue.
-     */
-    if (!vrt_list_push_back(
-            &scheduler->readyQueue,
-            &task->node))
+    if (!vrt_list_push_back(&scheduler->readyQueue, &task->node))
     {
         return;
     }
-
-    /*
-     * Only mark the task READY after successful
-     * insertion into the queue.
-     */
     task->state = VRT_TASK_READY;
 }

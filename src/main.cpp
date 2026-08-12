@@ -3,149 +3,255 @@
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
 
-/*=========================================================
- * Scheduler
- *=========================================================*/
+static vrt_task_t taskA;
+static vrt_task_t taskB;
 
-vrt_scheduler_t scheduler;
+static uint32_t stackA[VRT_STACK_SIZE];
+static uint32_t stackB[VRT_STACK_SIZE];
 
-/*=========================================================
- * Tasks
- *=========================================================*/
+static volatile uint32_t countA = 0;
+static volatile uint32_t countB = 0;
 
-vrt_task_t task1;
-vrt_task_t task2;
+/*
+ * Keep the first context-switch test completely independent
+ * of Arduino's underlying FreeRTOS scheduler.
+ *
+ * No delay()
+ * No vTaskDelay()
+ * No Arduino yield()
+ *
+ * Just burn some CPU cycles and explicitly yield through VertexRT.
+ */
 
-/*=========================================================
- * Stacks
- *=========================================================*/
+static void vertex_delay_cycles(uint32_t cycles)
+{
+    for (volatile uint32_t i = 0; i < cycles; ++i)
+    {
+        __asm__ volatile("nop");
+    }
+}
 
-uint32_t task1Stack[256];
-uint32_t task2Stack[256];
+/* =========================================================
+ * Task A
+ * ========================================================= */
 
-/*=========================================================
- * Task 1
- *=========================================================*/
-
-void task1_entry(void *argument)
+static void task_a(void *argument)
 {
     (void)argument;
 
-    while (true)
+    Serial.println();
+    Serial.println("========== TASK A STARTED ==========");
+
+    for (;;)
     {
-        Serial.println("Task 1 running");
+        ++countA;
+
+        Serial.print("A: ");
+        Serial.println(countA);
+
+        vertex_delay_cycles(300000);
+
+        Serial.println("A: yielding");
 
         vrt_task_yield();
     }
 }
 
-/*=========================================================
- * Task 2
- *=========================================================*/
+/* =========================================================
+ * Task B
+ * ========================================================= */
 
-void task2_entry(void *argument)
+static void task_b(void *argument)
 {
     (void)argument;
 
-    while (true)
+    Serial.println();
+    Serial.println("========== TASK B STARTED ==========");
+
+    for (;;)
     {
-        Serial.println("Task 2 running");
+        ++countB;
+
+        Serial.print("B: ");
+        Serial.println(countB);
+
+        vertex_delay_cycles(300000);
+
+        Serial.println("B: yielding");
 
         vrt_task_yield();
     }
 }
 
-/*=========================================================
+/* =========================================================
  * Setup
- *=========================================================*/
+ * ========================================================= */
 
 void setup()
 {
     Serial.begin(115200);
 
-    while (!Serial)
-    {
-        ;
-    }
+    /*
+     * Give the serial peripheral time to initialise.
+     * This occurs before VertexRT starts, so it does not
+     * affect the task context-switch test.
+     */
+    delay(1000);
 
     Serial.println();
-    Serial.println("==============================");
-    Serial.println("VertexRT Context Switch Test");
-    Serial.println("==============================");
+    Serial.println("====================================");
+    Serial.println("VERTEXRT TWO-TASK SWITCH TEST");
+    Serial.println("====================================");
 
-    /* Initialize scheduler */
-    vrt_scheduler_init(&scheduler);
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
 
-    /* Initialize task 1 */
-    vrt_task_init(
-        &task1,
-        task1_entry,
-        NULL,
-        1,
-        task1Stack,
-        256,
-        "Task 1");
-
-    /* Initialize task 2 */
-    vrt_task_init(
-        &task2,
-        task2_entry,
-        NULL,
-        1,
-        task2Stack,
-        256,
-        "Task 2");
-
-    /* Register tasks */
-    if (!vrt_scheduler_add_task(
-            &scheduler,
-            &task1))
+    if (scheduler == nullptr)
     {
-        Serial.println("ERROR: Failed to add Task 1");
-        while (true)
+        Serial.println("ERROR: scheduler instance is NULL.");
+
+        for (;;)
         {
         }
     }
 
-    if (!vrt_scheduler_add_task(
-            &scheduler,
-            &task2))
+    /* -----------------------------------------------------
+     * Scheduler initialization
+     * ----------------------------------------------------- */
+
+    Serial.println("Initializing scheduler...");
+
+    vrt_scheduler_init(scheduler);
+
+    Serial.println("Scheduler initialized.");
+
+    /* -----------------------------------------------------
+     * Task A initialization
+     * ----------------------------------------------------- */
+
+    Serial.println("Initializing Task A...");
+
+    vrt_task_init(
+        &taskA,
+        task_a,
+        nullptr,
+        1,
+        stackA,
+        VRT_STACK_SIZE,
+        "taskA");
+
+    if (taskA.sp == nullptr)
     {
-        Serial.println("ERROR: Failed to add Task 2");
-        while (true)
+        Serial.println("ERROR: Task A stack initialization failed.");
+
+        for (;;)
         {
         }
     }
 
-    Serial.println("Tasks created.");
-    Serial.println("Starting scheduler...");
+    Serial.printf(
+        "Task A SP = %p\n",
+        (void *)taskA.sp);
+
+    Serial.println("Task A initialized.");
+
+    /* -----------------------------------------------------
+     * Task B initialization
+     * ----------------------------------------------------- */
+
+    Serial.println("Initializing Task B...");
+
+    vrt_task_init(
+        &taskB,
+        task_b,
+        nullptr,
+        1,
+        stackB,
+        VRT_STACK_SIZE,
+        "taskB");
+
+    if (taskB.sp == nullptr)
+    {
+        Serial.println("ERROR: Task B stack initialization failed.");
+
+        for (;;)
+        {
+        }
+    }
+
+    Serial.printf(
+        "Task B SP = %p\n",
+        (void *)taskB.sp);
+
+    Serial.println("Task B initialized.");
+
+    /* -----------------------------------------------------
+     * Add tasks to VertexRT ready queue
+     * ----------------------------------------------------- */
+
+    if (!vrt_scheduler_add_task(
+            scheduler,
+            &taskA))
+    {
+        Serial.println("ERROR: Could not add Task A.");
+
+        for (;;)
+        {
+        }
+    }
+
+    Serial.println("Task A added.");
+
+    if (!vrt_scheduler_add_task(
+            scheduler,
+            &taskB))
+    {
+        Serial.println("ERROR: Could not add Task B.");
+
+        for (;;)
+        {
+        }
+    }
+
+    Serial.println("Task B added.");
 
     /*
-     * This should NOT return.
-     *
-     * The port starts Task 1 directly from its
-     * initialized CPU context.
+     * The underlying Arduino FreeRTOS task remains active
+     * here only until this function transfers control to
+     * VertexRT.
      */
-    vrt_scheduler_start(&scheduler);
+    Serial.println();
+    Serial.println("Starting VertexRT scheduler...");
+    Serial.println();
+
+    vrt_scheduler_start(scheduler);
 
     /*
-     * We should never reach here.
+     * vrt_scheduler_start() must never return.
      */
-    Serial.println("ERROR: Scheduler returned!");
+    Serial.println(
+        "ERROR: VertexRT scheduler returned!");
 
-    while (true)
+    for (;;)
     {
     }
 }
 
-/*=========================================================
+/* =========================================================
  * Arduino loop
- *=========================================================*/
+ * ========================================================= */
 
 void loop()
 {
     /*
-     * We should never reach Arduino loop once
-     * VertexRT takes control of the CPU.
+     * VertexRT should own execution after scheduler start.
+     *
+     * Reaching loop() means something went wrong.
      */
+    Serial.println(
+        "ERROR: Arduino loop() is running.");
+
+    for (;;)
+    {
+    }
 }

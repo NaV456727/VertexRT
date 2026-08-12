@@ -2,34 +2,59 @@
 #include "vrt_port_frame.h"
 
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
+#include <xtensa/corebits.h>
+#include <xtensa/xtensa_context.h>
+
 /*
- * Xtensa PS bits used by the FreeRTOS-style initial
- * task context.
- *
- * PS_UM       = user mode
- * PS_EXCM     = exception mode
- * PS_WOE      = window overflow enable
- * PS_CALLINC  = pretend the task was entered by CALL4
- *
- * For a normal windowed Xtensa task:
- *
- *     PS = PS_UM | PS_EXCM | PS_WOE | PS_CALLINC(1)
- *
- * Which is:
- *
- *     0x00050020
+ * Xtensa user exception exit dispatcher supplied by the SDK.
  */
+extern void _xt_user_exit(void);
 
-#define VRT_PS_UM 0x00000020U
-#define VRT_PS_EXCM 0x00000010U
-#define VRT_PS_WOE 0x00040000U
-#define VRT_PS_CALLINC_1 0x00010000U
+/*
+ * --------------------------------------------------------------------------
+ * Task trampoline
+ * --------------------------------------------------------------------------
+ *
+ * For the windowed ABI the initial frame places:
+ *
+ *     A6 = entry
+ *     A7 = argument
+ *
+ * because the initial PS pretends this function was entered by CALL4.
+ */
+static void vrt_task_trampoline(
+    vrt_task_function_t entry,
+    void *argument)
+{
+    if (entry != NULL)
+    {
+        entry(argument);
+    }
 
-#define VRT_INITIAL_PS \
-    (VRT_PS_UM | VRT_PS_EXCM | VRT_PS_WOE | VRT_PS_CALLINC_1)
+    /*
+     * A task must not return.
+     * vrt_task_exit() switches to another task.
+     */
+    vrt_task_exit();
 
+    /*
+     * Defensive fallback.
+     *
+     * We should never get here.
+     */
+    for (;;)
+    {
+    }
+}
+
+/*
+ * --------------------------------------------------------------------------
+ * Initial Xtensa task stack
+ * --------------------------------------------------------------------------
+ */
 uint32_t *vrt_port_stack_init(
     uint32_t *stackTop,
     vrt_task_function_t entry,
@@ -40,114 +65,120 @@ uint32_t *vrt_port_stack_init(
         return NULL;
     }
 
+    uintptr_t stackPointer = (uintptr_t)stackTop;
+
     /*
-     * Stack grows downward.
-     *
-     * The frame must be 16-byte aligned.
+     * Xtensa requires 16-byte stack alignment.
      */
-    uintptr_t top =
-        (uintptr_t)stackTop;
-
-    uintptr_t address =
-        top - sizeof(vrt_stack_frame_t);
-
-    address &= ~((uintptr_t)VRT_STACK_ALIGNMENT - 1U);
-
-    vrt_stack_frame_t *frame =
-        (vrt_stack_frame_t *)address;
+    stackPointer &=
+        ~((uintptr_t)0x0FU);
 
     /*
-     * Clear the entire initial context.
+     * XT_STK_FRMSZ includes the actual XtExcFrame plus the
+     * additional stack space required by the windowed ABI.
+     */
+    if (stackPointer < (uintptr_t)XT_STK_FRMSZ)
+    {
+        return NULL;
+    }
+
+    stackPointer -= (uintptr_t)XT_STK_FRMSZ;
+
+    /*
+     * Keep the complete frame aligned.
+     */
+    stackPointer &=
+        ~((uintptr_t)0x0FU);
+
+    /*
+     * Clear the entire allocation, not merely sizeof(XtExcFrame).
      */
     memset(
-        frame,
+        (void *)stackPointer,
         0,
-        sizeof(vrt_stack_frame_t));
+        (size_t)XT_STK_FRMSZ);
 
-    /*=====================================================
-     * Initial execution state
-     *=====================================================*/
+    XtExcFrame *frame =
+        (XtExcFrame *)stackPointer;
 
     /*
-     * Task entry point.
+     * ----------------------------------------------------------------------
+     * Core context
+     * ----------------------------------------------------------------------
      */
-    frame->pc =
-        (uint32_t)(uintptr_t)entry;
 
     /*
-     * Initial processor status.
+     * No caller.
      */
-    frame->ps =
-        VRT_INITIAL_PS;
-
-    /*=====================================================
-     * Stack registers
-     *=====================================================*/
+    frame->a0 = 0;
 
     /*
-     * A0 = 0
+     * A1 is the physical top of this allocated task frame.
      *
-     * This makes the initial task appear at the bottom
-     * of the call chain.
-     */
-    frame->a0 = 0U;
-
-    /*
-     * A1 = physical top of the frame.
+     * This is exactly how the FreeRTOS Xtensa port initializes it.
      */
     frame->a1 =
-        (uint32_t)(address +
-                   sizeof(vrt_stack_frame_t));
+        (uint32_t)(stackPointer +
+                   (uintptr_t)XT_STK_FRMSZ);
 
     /*
-     * A2 = task argument.
+     * Exception exit dispatcher.
+     */
+    frame->exit =
+        (uint32_t)(uintptr_t)_xt_user_exit;
+
+    /*
+     * The task begins in our trampoline.
+     */
+    frame->pc =
+        (uint32_t)(uintptr_t)vrt_task_trampoline;
+
+#ifdef __XTENSA_CALL0_ABI__
+
+    /*
+     * Call0 ABI:
      *
-     * This matches the normal Xtensa C calling convention
-     * for the task entry function.
+     *   vrt_task_trampoline(entry, argument)
+     *
+     * arguments are A2/A3.
      */
     frame->a2 =
+        (uint32_t)(uintptr_t)entry;
+
+    frame->a3 =
+        (uint32_t)(uintptr_t)argument;
+
+    frame->ps =
+        PS_UM |
+        PS_EXCM;
+
+#else
+
+    /*
+     * Windowed Xtensa ABI.
+     *
+     * FreeRTOS initializes a function entered as though it had
+     * been CALL4'd, so the first two arguments are placed in A6/A7.
+     */
+    frame->a6 =
+        (uint32_t)(uintptr_t)entry;
+
+    frame->a7 =
         (uint32_t)(uintptr_t)argument;
 
     /*
-     * Remaining registers start at zero.
+     * User mode
+     * Exception context
+     * Window overflow enabled
+     * CALLINC = 1 (CALL4-style entry)
      */
-    frame->a3 = 0U;
-    frame->a4 = 0U;
-    frame->a5 = 0U;
-    frame->a6 = 0U;
-    frame->a7 = 0U;
-    frame->a8 = 0U;
-    frame->a9 = 0U;
-    frame->a10 = 0U;
-    frame->a11 = 0U;
-    frame->a12 = 0U;
-    frame->a13 = 0U;
-    frame->a14 = 0U;
-    frame->a15 = 0U;
+    frame->ps =
+        PS_UM |
+        PS_EXCM |
+        PS_WOE |
+        PS_CALLINC(1);
 
-    /*=====================================================
-     * Special registers
-     *=====================================================*/
+#endif
 
-    frame->sar = 0U;
-
-    frame->exccause = 0U;
-    frame->excvaddr = 0U;
-
-    frame->lbeg = 0U;
-    frame->lend = 0U;
-    frame->lcount = 0U;
-
-    /*=====================================================
-     * Window spill/fill temporary storage
-     *=====================================================*/
-
-    frame->tmp0 = 0U;
-    frame->tmp1 = 0U;
-    frame->tmp2 = 0U;
-
-    /*
-     * Return the beginning of the saved context.
-     */
-    return (uint32_t *)frame;
+    return (uint32_t *)stackPointer;
 }

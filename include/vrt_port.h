@@ -1,63 +1,52 @@
 #ifndef VRT_PORT_H
 #define VRT_PORT_H
 
-#include "vrt_types.h"
 #include "vrt_task.h"
+
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-/*=========================================================
- * Stack Configuration
- *=========================================================*/
-
-/*
- * ESP32 Xtensa stack alignment.
- */
-#define VRT_STACK_ALIGNMENT 16U
-
-/*
- * Align an address downwards.
- */
-#define VRT_ALIGN_DOWN(addr, alignment) \
-    (((addr)) & ~((alignment) - 1U))
-
-    /*=========================================================
-     * Stack Initialization
-     *=========================================================*/
-
-    /**
-     * @brief Initialize a task's initial CPU context.
+    /*
+     * Build the initial Xtensa task frame.
      *
-     * @param stackTop Pointer to the top of the task stack.
-     * @param entry Task entry function.
-     * @param argument Task argument.
-     *
-     * @return Initial saved stack pointer.
+     * Returns a pointer to the task's initial stack/context pointer.
      */
     uint32_t *vrt_port_stack_init(
         uint32_t *stackTop,
         vrt_task_function_t entry,
         void *argument);
 
-    /*=========================================================
-     * Context Switching
-     *=========================================================*/
-
-    /**
-     * @brief Start execution of the first task.
+    /*
+     * Start the first task.
      *
-     * This function does not return.
+     * Does not return.
      */
-    void vrt_port_start_first_task(void);
+    void vrt_port_start_first_task(uint32_t *sp)
+        __attribute__((noreturn));
 
-    /**
-     * @brief Switch from the current task to the task
-     * selected by the scheduler.
+    /*
+     * Save the current task and restore the selected next task.
+     *
+     * saveSpOut = &currentTask->sp
+     * restoreSp = nextTask->sp
+     *
+     * Returns only when the saved task is scheduled again.
      */
-    void vrt_port_switch_context(void);
+    void vrt_port_switch_context(
+        uint32_t **saveSpOut,
+        uint32_t *restoreSp);
+
+    /*
+     * Restore a task without saving the current task.
+     *
+     * Used when a task terminates.
+     */
+    void vrt_port_restore_context(uint32_t *sp)
+        __attribute__((noreturn));
 
 #ifdef __cplusplus
 }

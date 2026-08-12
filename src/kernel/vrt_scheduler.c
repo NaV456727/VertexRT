@@ -16,41 +16,31 @@ static vrt_scheduler_t vrt_scheduler;
  *=========================================================*/
 
 static vrt_task_t vrt_idle_task;
-
 static uint32_t vrt_idle_stack[VRT_STACK_SIZE];
 
 /*=========================================================
  * Idle Task Function
  *=========================================================*/
 
-/*
- * The idle task runs whenever no user task is READY.
- *
- * For now the idle task simply yields continuously.
- *
- * Once the architecture-specific context switching
- * mechanism is implemented, this will provide the
- * processor with a permanent lowest-priority task.
- */
 static void vrt_idle_task_entry(void *argument)
 {
     (void)argument;
 
     while (true)
     {
-        vrt_task_yield();
+        /*
+         * The idle task should not continuously perform
+         * an architecture context switch.
+         *
+         * Just remain alive.
+         */
     }
 }
 
 /*=========================================================
- * Internal: Select First Ready Task
+ * Find First READY Task
  *=========================================================*/
 
-/*
- * Find the first READY task in the ready queue.
- *
- * Returns NULL when no user task is READY.
- */
 static vrt_task_t *vrt_scheduler_find_ready_task(
     vrt_scheduler_t *scheduler)
 {
@@ -80,30 +70,21 @@ static vrt_task_t *vrt_scheduler_find_ready_task(
 }
 
 /*=========================================================
- * Internal: Select Next Ready Task
+ * Find Next READY Task
  *=========================================================*/
 
-/*
- * Find the next READY task after the current task.
- *
- * The search wraps around the ready queue.
- */
 static vrt_task_t *vrt_scheduler_find_next_ready_task(
     vrt_scheduler_t *scheduler)
 {
-    if (scheduler == NULL)
-    {
-        return NULL;
-    }
-
-    if (scheduler->readyQueue.head == NULL)
+    if (scheduler == NULL ||
+        scheduler->readyQueue.head == NULL)
     {
         return NULL;
     }
 
     /*
-     * If current task is NULL or is the idle task,
-     * simply select the first READY user task.
+     * No current task or currently idle:
+     * start from the head of the ready queue.
      */
     if (scheduler->currentTask == NULL ||
         scheduler->currentTask == scheduler->idleTask)
@@ -112,32 +93,16 @@ static vrt_task_t *vrt_scheduler_find_next_ready_task(
     }
 
     /*
-     * Start searching after the current task.
+     * The current task may be RUNNING and may not have a node
+     * in the ready queue. Therefore do NOT use:
+     *
+     *     currentTask->node.next
+     *
+     * Start from the queue head and find the first READY task
+     * that is different from the current task.
      */
     vrt_list_node_t *node =
-        scheduler->currentTask->node.next;
-
-    /*
-     * Search from current->next to the end.
-     */
-    while (node != NULL)
-    {
-        vrt_task_t *task =
-            (vrt_task_t *)node->owner;
-
-        if (task != NULL &&
-            task->state == VRT_TASK_READY)
-        {
-            return task;
-        }
-
-        node = node->next;
-    }
-
-    /*
-     * Wrap around and search from the beginning.
-     */
-    node = scheduler->readyQueue.head;
+        scheduler->readyQueue.head;
 
     while (node != NULL)
     {
@@ -145,6 +110,7 @@ static vrt_task_t *vrt_scheduler_find_next_ready_task(
             (vrt_task_t *)node->owner;
 
         if (task != NULL &&
+            task != scheduler->currentTask &&
             task->state == VRT_TASK_READY)
         {
             return task;
@@ -167,39 +133,28 @@ void vrt_scheduler_init(vrt_scheduler_t *scheduler)
         return;
     }
 
-    /*
-     * Initialize ready queue.
-     *
-     * IMPORTANT:
-     *
-     * The idle task is not inserted into this queue.
-     */
     vrt_list_init(&scheduler->readyQueue);
 
     scheduler->currentTask = NULL;
     scheduler->idleTask = NULL;
 
-    scheduler->tickCount = 0;
-    scheduler->taskCount = 0;
+    scheduler->tickCount = 0U;
+    scheduler->taskCount = 0U;
 
     scheduler->running = false;
 
-    /*=====================================================
-     * Initialize Idle Task
-     *=====================================================*/
-
+    /*
+     * Initialize idle task.
+     */
     vrt_task_init(
         &vrt_idle_task,
         vrt_idle_task_entry,
         NULL,
-        0,
+        0U,
         vrt_idle_stack,
         VRT_STACK_SIZE,
         "idle");
 
-    /*
-     * Mark the task as kernel-owned idle task.
-     */
     vrt_idle_task.isIdle = true;
 
     /*
@@ -208,14 +163,14 @@ void vrt_scheduler_init(vrt_scheduler_t *scheduler)
     vrt_idle_task.state = VRT_TASK_READY;
 
     /*
-     * ID zero is reserved for the idle task.
+     * Reserve ID 0 for idle.
      */
-    vrt_idle_task.id = 0;
+    vrt_idle_task.id = 0U;
 
     scheduler->idleTask = &vrt_idle_task;
 
     /*
-     * The scheduler starts with the idle task selected.
+     * Before the scheduler starts, idle is selected.
      */
     scheduler->currentTask = scheduler->idleTask;
 }
@@ -233,36 +188,21 @@ bool vrt_scheduler_add_task(
         return false;
     }
 
-    /*
-     * The idle task cannot be registered as a normal
-     * user task.
-     */
     if (task->isIdle)
     {
         return false;
     }
 
-    /*
-     * Do not exceed the configured USER task limit.
-     *
-     * The idle task does not count toward this limit.
-     */
     if (scheduler->taskCount >= VRT_MAX_TASKS)
     {
         return false;
     }
 
-    /*
-     * Only READY tasks can enter the ready queue.
-     */
     if (task->state != VRT_TASK_READY)
     {
         return false;
     }
 
-    /*
-     * Add task to ready queue.
-     */
     if (!vrt_list_push_back(
             &scheduler->readyQueue,
             &task->node))
@@ -273,16 +213,11 @@ bool vrt_scheduler_add_task(
     scheduler->taskCount++;
 
     /*
-     * If the scheduler is not running and the idle task
-     * is currently selected, the first user task becomes
-     * the initial task.
+     * Do NOT change currentTask here.
+     *
+     * Scheduler start is responsible for selecting
+     * the first task.
      */
-    if (!scheduler->running &&
-        scheduler->currentTask == scheduler->idleTask)
-    {
-        scheduler->currentTask = task;
-    }
-
     return true;
 }
 
@@ -298,56 +233,70 @@ void vrt_scheduler_schedule(
         return;
     }
 
-    /*
-     * Put the currently running user task back
-     * into the READY state.
-     *
-     * The idle task is never placed in the ready queue.
-     */
-    if (scheduler->currentTask != NULL &&
-        scheduler->currentTask != scheduler->idleTask)
-    {
-        if (scheduler->currentTask->state ==
-            VRT_TASK_RUNNING)
-        {
-            scheduler->currentTask->state =
-                VRT_TASK_READY;
-        }
-    }
+    vrt_task_t *current =
+        scheduler->currentTask;
 
-    /*
-     * Find the next READY user task.
-     */
     vrt_task_t *next =
         vrt_scheduler_find_next_ready_task(scheduler);
 
     /*
-     * No READY user task exists.
-     * Run the idle task.
+     * No different READY task exists.
      */
     if (next == NULL)
     {
-        if (scheduler->idleTask == NULL)
+        /*
+         * Keep the current task running if it is still valid.
+         */
+        if (current != NULL &&
+            current != scheduler->idleTask &&
+            current->state == VRT_TASK_RUNNING)
         {
-            scheduler->currentTask = NULL;
             return;
         }
 
-        scheduler->idleTask->state =
-            VRT_TASK_RUNNING;
+        /*
+         * Otherwise fall back to idle.
+         */
+        if (scheduler->idleTask != NULL)
+        {
+            if (current != NULL &&
+                current != scheduler->idleTask &&
+                current->state == VRT_TASK_RUNNING)
+            {
+                current->state = VRT_TASK_READY;
+            }
 
-        scheduler->currentTask =
-            scheduler->idleTask;
+            scheduler->idleTask->state =
+                VRT_TASK_RUNNING;
+
+            scheduler->currentTask =
+                scheduler->idleTask;
+        }
 
         return;
     }
 
     /*
-     * A user task was found.
+     * Move the old task back to READY only if it was
+     * actually running and is not idle.
      */
-    next->state = VRT_TASK_RUNNING;
+    if (current != NULL &&
+        current != scheduler->idleTask &&
+        current != next &&
+        current->state == VRT_TASK_RUNNING)
+    {
+        current->state =
+            VRT_TASK_READY;
+    }
 
-    scheduler->currentTask = next;
+    /*
+     * Select the new task.
+     */
+    next->state =
+        VRT_TASK_RUNNING;
+
+    scheduler->currentTask =
+        next;
 }
 
 /*=========================================================
@@ -362,23 +311,18 @@ void vrt_scheduler_tick(
         return;
     }
 
-    /*
-     * Increment kernel tick counter.
-     */
     scheduler->tickCount++;
 
-    /*
-     * Scheduler has not started yet.
-     */
     if (!scheduler->running)
     {
         return;
     }
-
     /*
-     * Every tick is currently a scheduling opportunity.
+     * Preemptive switching is not implemented yet.
+     *
+     * Only account for the tick.
      */
-    vrt_scheduler_schedule(scheduler);
+    return;
 }
 
 /*=========================================================
@@ -393,18 +337,13 @@ void vrt_scheduler_start(
         return;
     }
 
-    /*
-     * Do not start twice.
-     */
     if (scheduler->running)
     {
         return;
     }
 
     /*
-     * Select a READY user task if one exists.
-     *
-     * Otherwise the idle task is used.
+     * Select the first runnable task.
      */
     vrt_task_t *first =
         vrt_scheduler_find_ready_task(scheduler);
@@ -412,35 +351,42 @@ void vrt_scheduler_start(
     if (first != NULL)
     {
         scheduler->currentTask = first;
+        first->state = VRT_TASK_RUNNING;
     }
     else
     {
-        scheduler->currentTask = scheduler->idleTask;
+        /*
+         * No user task exists.
+         * Start the idle task instead.
+         */
+        if (scheduler->idleTask == NULL)
+        {
+            return;
+        }
+
+        scheduler->currentTask =
+            scheduler->idleTask;
+
+        scheduler->idleTask->state =
+            VRT_TASK_RUNNING;
     }
 
-    if (scheduler->currentTask == NULL)
-    {
-        return;
-    }
-
-    /*
-     * Mark scheduler as running.
-     */
     scheduler->running = true;
 
     /*
-     * Mark first task as running.
+     * Architecture bootstrap.
+     *
+     * Does not return.
      */
-    scheduler->currentTask->state =
-        VRT_TASK_RUNNING;
+    vrt_port_start_first_task(
+        scheduler->currentTask->sp);
 
     /*
-     * Transfer control to the architecture-specific
-     * first-task startup routine.
-     *
-     * This function is expected not to return.
+     * Defensive fallback.
      */
-    vrt_port_start_first_task();
+    for (;;)
+    {
+    }
 }
 
 /*=========================================================

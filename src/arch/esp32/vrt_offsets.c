@@ -1,114 +1,128 @@
+#include "vrt_port_frame.h"
+#include "vrt_offsets.h"
+
 #include <stddef.h>
 
-#include "vrt_task.h"
-#include "vrt_scheduler.h"
-#include "vrt_port_frame.h"
+/* --------------------------------------------------------------------------
+ * Register/context offset verification
+ * -------------------------------------------------------------------------- */
 
-/*
- * VertexRT
- * Architecture Structure Offsets
- *
- * These values are derived directly from the actual C structures.
- *
- * The build system can use these symbols to generate the
- * assembly-visible offset definitions.
- */
+_Static_assert(
+    offsetof(vrt_context_frame_t, exit) == VRT_CTX_EXIT,
+    "exit offset mismatch");
 
-/*=========================================================
- * Scheduler
- *=========================================================*/
+_Static_assert(
+    offsetof(vrt_context_frame_t, pc) == VRT_CTX_PC,
+    "pc offset mismatch");
 
-const unsigned int vrt_generated_scheduler_current_task_offset =
-    offsetof(vrt_scheduler_t, currentTask);
+_Static_assert(
+    offsetof(vrt_context_frame_t, ps) == VRT_CTX_PS,
+    "ps offset mismatch");
 
-/*=========================================================
- * Task
- *=========================================================*/
+_Static_assert(
+    offsetof(vrt_context_frame_t, a0) == VRT_CTX_A0,
+    "a0 offset mismatch");
 
-const unsigned int vrt_generated_task_sp_offset =
-    offsetof(vrt_task_t, sp);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a1) == VRT_CTX_A1,
+    "a1 offset mismatch");
 
-/*=========================================================
- * Initial Context Frame
- *=========================================================*/
+_Static_assert(
+    offsetof(vrt_context_frame_t, a2) == VRT_CTX_A2,
+    "a2 offset mismatch");
 
-const unsigned int vrt_generated_frame_a0 =
-    offsetof(vrt_stack_frame_t, a0);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a3) == VRT_CTX_A3,
+    "a3 offset mismatch");
 
-const unsigned int vrt_generated_frame_a1 =
-    offsetof(vrt_stack_frame_t, a1);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a4) == VRT_CTX_A4,
+    "a4 offset mismatch");
 
-const unsigned int vrt_generated_frame_a2 =
-    offsetof(vrt_stack_frame_t, a2);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a5) == VRT_CTX_A5,
+    "a5 offset mismatch");
 
-const unsigned int vrt_generated_frame_a3 =
-    offsetof(vrt_stack_frame_t, a3);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a6) == VRT_CTX_A6,
+    "a6 offset mismatch");
 
-const unsigned int vrt_generated_frame_a4 =
-    offsetof(vrt_stack_frame_t, a4);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a7) == VRT_CTX_A7,
+    "a7 offset mismatch");
 
-const unsigned int vrt_generated_frame_a5 =
-    offsetof(vrt_stack_frame_t, a5);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a8) == VRT_CTX_A8,
+    "a8 offset mismatch");
 
-const unsigned int vrt_generated_frame_a6 =
-    offsetof(vrt_stack_frame_t, a6);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a9) == VRT_CTX_A9,
+    "a9 offset mismatch");
 
-const unsigned int vrt_generated_frame_a7 =
-    offsetof(vrt_stack_frame_t, a7);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a10) == VRT_CTX_A10,
+    "a10 offset mismatch");
 
-const unsigned int vrt_generated_frame_a8 =
-    offsetof(vrt_stack_frame_t, a8);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a11) == VRT_CTX_A11,
+    "a11 offset mismatch");
 
-const unsigned int vrt_generated_frame_a9 =
-    offsetof(vrt_stack_frame_t, a9);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a12) == VRT_CTX_A12,
+    "a12 offset mismatch");
 
-const unsigned int vrt_generated_frame_a10 =
-    offsetof(vrt_stack_frame_t, a10);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a13) == VRT_CTX_A13,
+    "a13 offset mismatch");
 
-const unsigned int vrt_generated_frame_a11 =
-    offsetof(vrt_stack_frame_t, a11);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a14) == VRT_CTX_A14,
+    "a14 offset mismatch");
 
-const unsigned int vrt_generated_frame_a12 =
-    offsetof(vrt_stack_frame_t, a12);
+_Static_assert(
+    offsetof(vrt_context_frame_t, a15) == VRT_CTX_A15,
+    "a15 offset mismatch");
 
-const unsigned int vrt_generated_frame_a13 =
-    offsetof(vrt_stack_frame_t, a13);
+_Static_assert(
+    offsetof(vrt_context_frame_t, sar) == VRT_CTX_SAR,
+    "sar offset mismatch");
 
-const unsigned int vrt_generated_frame_a14 =
-    offsetof(vrt_stack_frame_t, a14);
+_Static_assert(
+    offsetof(vrt_context_frame_t, exccause) == VRT_CTX_EXCCAUSE,
+    "exccause offset mismatch");
 
-const unsigned int vrt_generated_frame_a15 =
-    offsetof(vrt_stack_frame_t, a15);
+_Static_assert(
+    offsetof(vrt_context_frame_t, excvaddr) == VRT_CTX_EXCVADDR,
+    "excvaddr offset mismatch");
 
-/*=========================================================
- * Special Registers
- *=========================================================*/
+_Static_assert(
+    offsetof(vrt_context_frame_t, lbeg) == VRT_CTX_LBEG,
+    "lbeg offset mismatch");
 
-const unsigned int vrt_generated_frame_ps =
-    offsetof(vrt_stack_frame_t, ps);
+_Static_assert(
+    offsetof(vrt_context_frame_t, lend) == VRT_CTX_LEND,
+    "lend offset mismatch");
 
-const unsigned int vrt_generated_frame_sar =
-    offsetof(vrt_stack_frame_t, sar);
+_Static_assert(
+    offsetof(vrt_context_frame_t, lcount) == VRT_CTX_LCOUNT,
+    "lcount offset mismatch");
 
-const unsigned int vrt_generated_frame_lbeg =
-    offsetof(vrt_stack_frame_t, lbeg);
+_Static_assert(
+    offsetof(vrt_context_frame_t, tmp0) == VRT_CTX_TMP0,
+    "tmp0 offset mismatch");
 
-const unsigned int vrt_generated_frame_lend =
-    offsetof(vrt_stack_frame_t, lend);
+_Static_assert(
+    offsetof(vrt_context_frame_t, tmp1) == VRT_CTX_TMP1,
+    "tmp1 offset mismatch");
 
-const unsigned int vrt_generated_frame_lcount =
-    offsetof(vrt_stack_frame_t, lcount);
+_Static_assert(
+    offsetof(vrt_context_frame_t, tmp2) == VRT_CTX_TMP2,
+    "tmp2 offset mismatch");
 
-/*=========================================================
- * Program Counter
- *=========================================================*/
+/* --------------------------------------------------------------------------
+ * Structure size verification
+ * -------------------------------------------------------------------------- */
 
-const unsigned int vrt_generated_frame_pc =
-    offsetof(vrt_stack_frame_t, pc);
-
-/*=========================================================
- * Frame Size
- *=========================================================*/
-
-const unsigned int vrt_generated_frame_size =
-    sizeof(vrt_stack_frame_t);
+_Static_assert(
+    sizeof(vrt_context_frame_t) == VRT_CTX_FRAME_SIZE,
+    "context frame size mismatch");
