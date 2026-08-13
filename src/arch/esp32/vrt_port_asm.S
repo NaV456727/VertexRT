@@ -1,155 +1,171 @@
 #include <xtensa/coreasm.h>
 #include <xtensa/corebits.h>
 #include <xtensa/xtensa_context.h>
-#include "sdkconfig.h"
 
 .text
 .align 4
 
 .extern _xt_context_restore
 .extern xthal_window_spill_nw
+.extern _xt_user_exit
 
 /*
  * ============================================================================
- * VertexRT ESP32 Xtensa Port
+ * VertexRT ESP32 Xtensa port
  *
- * Architecture:
- *     Xtensa LX6 / ESP32
- *     Windowed ABI
+ * The low-level Xtensa context machinery is taken from the ESP32 FreeRTOS
+ * Xtensa port model:
  *
- * Context model copied from the ESP32 FreeRTOS Xtensa port:
+ *   - XtExcFrame for full contexts
+ *   - XtSolFrame for solicited contexts
+ *   - _xt_context_restore()
+ *   - xthal_window_spill_nw()
+ *   - retw for solicited contexts
+ *   - frame->exit for full contexts
  *
- *     - XtExcFrame for task startup/full context
- *     - XtSolFrame for cooperative task switching
- *     - _xt_context_restore()
- *     - xthal_window_spill_nw()
- *     - retw for solicited frames
- *     - frame->exit for full frames
+ * VertexRT differs from FreeRTOS in one important respect:
  *
- * IMPORTANT:
+ *   The C scheduler has already selected the next task.
  *
- * A normal C function called through the Xtensa windowed ABI receives its
- * first arguments in A10/A11.
+ * Therefore vrt_port_switch_context() does NOT call a scheduler dispatcher.
+ * It receives:
  *
- * Therefore:
+ *   a2 = &currentTask->sp
+ *   a3 = nextTask->sp
  *
- *     vrt_port_start_first_task(sp)
- *         A10 = sp
+ * and performs only the architecture-level save/restore.
  *
- *     vrt_port_restore_context(sp)
- *         A10 = sp
- *
- *     vrt_port_switch_context(&saveSp, restoreSp)
- *         A10 = &saveSp
- *         A11 = restoreSp
- *
- * This is intentionally aligned with the FreeRTOS windowed ABI behaviour.
  * ============================================================================
  */
 
 
 /*
  * ============================================================================
- * XtSolFrame temporary storage
+ * ESP32 XtSolFrame scratch area
  *
- * For the ESP32 windowed Xtensa configuration used by this project:
+ * On the ESP32 Xtensa windowed ABI:
  *
- *     0x00 = XT_SOL_EXIT
- *     0x04 = XT_SOL_PC
- *     0x08 = XT_SOL_PS
- *     0x0C = XT_SOL_THREADPTR
- *     0x10 = XT_SOL_NEXT
+ *     XT_SOL_EXIT       = 0
+ *     XT_SOL_PC         = 4
+ *     XT_SOL_PS         = 8
+ *     XT_SOL_THREADPTR  = 12
+ *     XT_SOL_NEXT       = 16
  *
- * The complete solicited frame is 32 bytes.
+ * XT_SOL_FRMSZ is aligned beyond this area.
  *
- * The remaining words at:
+ * VertexRT uses the remaining words for the two C arguments:
  *
- *     0x18
- *     0x1C
+ *     16  -> saveSpOut
+ *     20  -> restoreSp
  *
- * are used here as temporary storage for the two C arguments.
+ * These values must survive xthal_window_spill_nw(), which is a CALL0
+ * routine and may destroy normal argument registers.
  *
- * These are deliberately literal offsets because the assembler rejects
- * expressions involving XT_SOL_NEXT as symbolic operands on this toolchain.
  * ============================================================================
  */
 
-#define VRT_SOL_SAVE_SP       24
-#define VRT_SOL_RESTORE_SP    28
+#define VRT_SOL_SAVE_SP      16
+#define VRT_SOL_RESTORE_SP   20
 
 
 /*
  * ============================================================================
  * vrt_port_start_first_task
  *
- * C:
+ * C prototype:
  *
  *     void vrt_port_start_first_task(uint32_t *sp);
  *
- * Windowed ABI input:
+ * Entry:
  *
- *     A10 = initial XtExcFrame *
+ *     a2 = initial XtExcFrame *
  *
- * This mirrors the FreeRTOS full-frame restore path.
+ * The initial task is represented by a complete exception frame.
  *
- * _xt_context_restore() restores the architectural registers except the
- * return/exception-control portion handled by the exit dispatcher.
+ * This follows the FreeRTOS full-frame restore path:
+ *
+ *     A1 = frame
+ *     _xt_context_restore()
+ *     A0 = frame->exit
+ *     ret
+ *
+ * _xt_user_exit then performs the final exception return.
+ *
+ * Does not return.
  * ============================================================================
  */
 
 .global vrt_port_start_first_task
 .type   vrt_port_start_first_task, @function
-.align 4
+.align  4
+
+/*
+ * Called from the normal Xtensa windowed ABI.
+ *
+ * C prototype:
+ *
+ *     void vrt_port_start_first_task(uint32_t *sp);
+ *
+ * Therefore:
+ *
+ *     A10 = sp
+ *
+ * This function never returns.
+ */
 
 vrt_port_start_first_task:
 
     /*
-     * Normal windowed C argument:
+     * A10 contains task->sp.
      *
-     *     A10 = initial task stack pointer
+     * Switch to the task's initial Xtensa exception frame.
      */
     mov     a1, a10
 
     /*
-     * Restore the complete Xtensa task context.
+     * Restore the general Xtensa register context.
+     *
+     * _xt_context_restore() does not restore the architectural
+     * return state (PC/PS/A0/A1).
      */
     call0   _xt_context_restore
 
     /*
-     * The frame contains the exit dispatcher.
+     * The first word of the frame is the Xtensa exit dispatcher.
      *
-     * This is exactly the same mechanism used by FreeRTOS _frxt_dispatch().
+     * For our FreeRTOS-generated task frame this should be:
+     *
+     *     _xt_user_exit
      */
     l32i    a0, a1, XT_STK_EXIT
 
     /*
-     * _xt_user_exit() now performs the final exception return using the
-     * restored frame state.
+     * Do NOT return through the original CALL8 frame.
+     *
+     * We are abandoning the scheduler's stack and jumping directly
+     * into the Xtensa exception exit dispatcher.
      */
-    ret
-
-.size vrt_port_start_first_task, .-vrt_port_start_first_task
-
+    jx      a0
 
 /*
  * ============================================================================
  * vrt_port_restore_context
  *
- * C:
+ * C prototype:
  *
  *     void vrt_port_restore_context(uint32_t *sp);
  *
- * Windowed ABI:
+ * Used when the current task is terminating and therefore must not be saved.
  *
- *     A10 = target task SP
+ * Entry:
  *
- * Used when a task terminates and therefore must not have its own context
- * saved.
+ *     a2 = target task SP
  *
- * Target frame can be:
+ * Target frame:
  *
- *     - XtSolFrame
- *     - XtExcFrame
+ *     XT_STK_EXIT == 0  -> XtSolFrame
+ *     XT_STK_EXIT != 0  -> XtExcFrame
+ *
  * ============================================================================
  */
 
@@ -160,24 +176,21 @@ vrt_port_start_first_task:
 vrt_port_restore_context:
 
     /*
-     * A10 = target task SP.
+     * a2 = target task SP
      */
-    mov     a1, a10
+    mov     a1, a2
 
     /*
-     * XT_SOL_EXIT is located at offset 0 as well.
-     *
-     * 0     -> solicited frame
-     * != 0  -> full interrupt/exception frame
+     * Determine frame type.
      */
-    l32i    a2, a1, XT_STK_EXIT
+    l32i    a3, a1, XT_STK_EXIT
 
-    bnez    a2, .L_restore_full
+    bnez    a3, .L_restore_full
 
 
 /*
  * --------------------------------------------------------------------------
- * Restore solicited frame
+ * Solicited frame
  * --------------------------------------------------------------------------
  */
 
@@ -193,45 +206,49 @@ vrt_port_restore_context:
     /*
      * Restore saved PS and return PC.
      */
-    l32i    a2, a1, XT_SOL_PS
+    l32i    a3, a1, XT_SOL_PS
     l32i    a0, a1, XT_SOL_PC
 
     /*
-     * Restore processor state.
+     * Publish PS before returning.
      */
-    wsr     a2, PS
+    wsr     a3, PS
     rsync
 
     /*
-     * Drop the solicited frame.
+     * Windowed ABI:
+     *
+     * The XtSolFrame was created using ENTRY, so retw restores the
+     * previous register-window state.
      */
     addi    a1, a1, XT_SOL_FRMSZ
 
-    /*
-     * Resume the task through the windowed return mechanism.
-     */
     retw
 
 
 /*
  * --------------------------------------------------------------------------
- * Restore full XtExcFrame
+ * Full XtExcFrame
  * --------------------------------------------------------------------------
  */
 
 .L_restore_full:
 
     /*
-     * Restore complete task state.
+     * Restore the complete architectural context.
      */
     call0   _xt_context_restore
 
     /*
-     * Return through the task's exit dispatcher.
+     * Restore the exception exit dispatcher.
      */
     l32i    a0, a1, XT_STK_EXIT
 
+    /*
+     * Return through _xt_user_exit / corresponding dispatcher.
+     */
     ret
+
 
 .size vrt_port_restore_context, .-vrt_port_restore_context
 
@@ -240,35 +257,30 @@ vrt_port_restore_context:
  * ============================================================================
  * vrt_port_switch_context
  *
- * C:
+ * C prototype:
  *
  *     void vrt_port_switch_context(
  *         uint32_t **saveSpOut,
  *         uint32_t  *restoreSp
  *     );
  *
- * Windowed ABI input:
+ * Entry:
  *
- *     A10 = saveSpOut
- *     A11 = restoreSp
+ *     a2 = &currentTask->sp
+ *     a3 = nextTask->sp
  *
- * This is deliberately modelled after FreeRTOS vPortYield().
+ * The C scheduler has already selected the target.
  *
- * Steps:
+ * This routine:
  *
- *     1. Create XtSolFrame
- *     2. Save PC/PS/threadptr
- *     3. Save A10/A11 in temporary frame slots
- *     4. Spill register windows
- *     5. Restore original PS
- *     6. Disable interrupts
- *     7. Recover A10/A11
- *     8. Mark frame as solicited
- *     9. Store current task SP
- *    10. Load next task SP
- *    11. Restore next task
+ *     1. creates XtSolFrame
+ *     2. saves current PC/PS/threadptr
+ *     3. saves the C arguments in scratch words
+ *     4. performs FreeRTOS-style window spilling
+ *     5. publishes current SP
+ *     6. loads next SP
+ *     7. restores XtSolFrame or XtExcFrame
  *
- * The scheduler has already selected the next task in C.
  * ============================================================================
  */
 
@@ -279,13 +291,11 @@ vrt_port_restore_context:
 vrt_port_switch_context:
 
     /*
-     * FreeRTOS vPortYield() uses the standard XtSolFrame.
+     * Allocate the normal solicited frame.
      *
-     * For this ESP32 configuration:
-     *
-     *     XT_SOL_FRMSZ = 32
+     * This matches FreeRTOS vPortYield() for the windowed ABI.
      */
-    entry   sp, XT_SOL_FRMSZ
+    entry   a1, XT_SOL_FRMSZ
 
 
     /*
@@ -296,40 +306,36 @@ vrt_port_switch_context:
 
     rsr     a4, PS
 
-    s32i    a0, sp, XT_SOL_PC
-    s32i    a4, sp, XT_SOL_PS
+    s32i    a0, a1, XT_SOL_PC
+    s32i    a4, a1, XT_SOL_PS
 
 #if XCHAL_HAVE_THREADPTR
 
     rur.threadptr a4
-    s32i    a4, sp, XT_SOL_THREADPTR
+    s32i    a4, a1, XT_SOL_THREADPTR
 
 #endif
 
 
     /*
      * ----------------------------------------------------------------------
-     * Save the incoming C arguments.
-     *
-     * IMPORTANT:
-     *
-     * These are A10/A11, not A2/A3.
-     *
-     * The FreeRTOS port does not have this problem because vPortYield()
-     * takes no arguments.
-     *
-     * We therefore preserve our two arguments explicitly before calling
-     * xthal_window_spill_nw().
+     * Preserve VertexRT switch arguments
      * ----------------------------------------------------------------------
+     *
+     * xthal_window_spill_nw() is CALL0 and can destroy normal argument
+     * registers.
+     *
+     * The values are therefore kept in the unused/padding portion of the
+     * XtSolFrame.
      */
 
-    s32i    a10, sp, VRT_SOL_SAVE_SP
-    s32i    a11, sp, VRT_SOL_RESTORE_SP
+    s32i    a2, a1, VRT_SOL_SAVE_SP
+    s32i    a3, a1, VRT_SOL_RESTORE_SP
 
 
     /*
      * ----------------------------------------------------------------------
-     * FreeRTOS window-spill sequence
+     * FreeRTOS-style register-window spill
      * ----------------------------------------------------------------------
      *
      * Temporarily:
@@ -337,12 +343,13 @@ vrt_port_switch_context:
      *     WOE      = 0
      *     INTLEVEL = XCHAL_EXCM_LEVEL
      *
-     * This is the same mechanism used by FreeRTOS vPortYield().
+     * so register-window overflow handling can spill the outstanding
+     * windows safely.
      */
 
-    movi    a6, ~(PS_WOE_MASK | PS_INTLEVEL_MASK)
+    movi    a5, ~(PS_WOE_MASK | PS_INTLEVEL_MASK)
 
-    and     a4, a4, a6
+    and     a4, a4, a5
 
     addi    a4, a4, XCHAL_EXCM_LEVEL
 
@@ -350,18 +357,18 @@ vrt_port_switch_context:
     rsync
 
     /*
-     * Spill all outstanding register windows.
+     * Spill outstanding register windows.
      */
     call0   xthal_window_spill_nw
 
 
     /*
      * ----------------------------------------------------------------------
-     * Restore the task's original PS
+     * Restore original task PS
      * ----------------------------------------------------------------------
      */
 
-    l32i    a4, sp, XT_SOL_PS
+    l32i    a4, a1, XT_SOL_PS
 
     wsr     a4, PS
     rsync
@@ -369,57 +376,55 @@ vrt_port_switch_context:
 
     /*
      * ----------------------------------------------------------------------
-     * Prevent interruption while publishing the saved context
+     * Prevent interrupts while publishing the new task state.
      * ----------------------------------------------------------------------
      */
 
-    rsil    a6, XCHAL_EXCM_LEVEL
+    rsil    a5, XCHAL_EXCM_LEVEL
 
 
     /*
      * ----------------------------------------------------------------------
-     * Recover the original C arguments.
+     * Recover VertexRT arguments
      * ----------------------------------------------------------------------
      */
 
-    l32i    a10, sp, VRT_SOL_SAVE_SP
-    l32i    a11, sp, VRT_SOL_RESTORE_SP
+    l32i    a2, a1, VRT_SOL_SAVE_SP
+    l32i    a3, a1, VRT_SOL_RESTORE_SP
 
 
     /*
      * ----------------------------------------------------------------------
-     * Mark this as a solicited frame.
+     * Mark this frame as solicited
+     * ----------------------------------------------------------------------
      *
-     * FreeRTOS uses XT_SOL_EXIT == 0 for this purpose.
-     * ----------------------------------------------------------------------
+     * FreeRTOS uses zero in XT_SOL_EXIT to distinguish a solicited frame
+     * from an exception/full frame.
      */
 
     movi    a4, 0
-    s32i    a4, sp, XT_SOL_EXIT
+
+    s32i    a4, a1, XT_SOL_EXIT
 
 
     /*
      * ----------------------------------------------------------------------
-     * Save current task's SP
-     *
-     *     *saveSpOut = current XtSolFrame
-     *
-     * A10 = saveSpOut
+     * Save current task SP
      * ----------------------------------------------------------------------
+     *
+     *     *saveSpOut = current task's XtSolFrame
      */
 
-    s32i    sp, a10, 0
+    s32i    a1, a2, 0
 
 
     /*
      * ----------------------------------------------------------------------
-     * Switch to next task
-     *
-     * A11 = next task SP
+     * Switch to selected task
      * ----------------------------------------------------------------------
      */
 
-    mov     sp, a11
+    mov     a1, a3
 
 
     /*
@@ -428,14 +433,14 @@ vrt_port_switch_context:
      * ----------------------------------------------------------------------
      */
 
-    l32i    a4, sp, XT_STK_EXIT
+    l32i    a4, a1, XT_STK_EXIT
 
     bnez    a4, .L_switch_full
 
 
 /*
  * --------------------------------------------------------------------------
- * Restore solicited frame
+ * Solicited target
  * --------------------------------------------------------------------------
  */
 
@@ -443,52 +448,50 @@ vrt_port_switch_context:
 
 #if XCHAL_HAVE_THREADPTR
 
-    l32i    a2, sp, XT_SOL_THREADPTR
+    l32i    a2, a1, XT_SOL_THREADPTR
     wur.threadptr a2
 
 #endif
 
     /*
-     * Restore target PS and return PC.
+     * Restore target task's minimal context.
      */
-    l32i    a4, sp, XT_SOL_PS
-    l32i    a0, sp, XT_SOL_PC
+    l32i    a4, a1, XT_SOL_PS
+    l32i    a0, a1, XT_SOL_PC
 
     /*
-     * Restore processor state.
+     * Restore processor status.
      */
     wsr     a4, PS
     rsync
 
     /*
-     * Remove target's solicited frame.
+     * Return through Xtensa window restoration.
      */
-    addi    sp, sp, XT_SOL_FRMSZ
+    addi    a1, a1, XT_SOL_FRMSZ
 
-    /*
-     * Resume target task.
-     */
     retw
 
 
 /*
  * --------------------------------------------------------------------------
- * Restore full XtExcFrame
+ * Full XtExcFrame target
  * --------------------------------------------------------------------------
  */
 
 .L_switch_full:
 
     /*
-     * Restore complete architectural state.
+     * Restore full architectural context.
      */
     call0   _xt_context_restore
 
     /*
-     * Return through target task's exit dispatcher.
+     * Full frames return through their saved exit dispatcher.
      */
-    l32i    a0, sp, XT_STK_EXIT
+    l32i    a0, a1, XT_STK_EXIT
 
     ret
+
 
 .size vrt_port_switch_context, .-vrt_port_switch_context

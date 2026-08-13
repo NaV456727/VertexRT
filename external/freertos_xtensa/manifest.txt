@@ -1,0 +1,42 @@
+﻿VertexRT FreeRTOS Xtensa Vendor Set
+====================================
+
+Platform:
+    ESP32
+    Arduino-ESP32 framework
+    ESP-IDF SDK bundled with PlatformIO
+
+SDK root:
+    C:\Users\DELL\.platformio\packages\framework-arduinoespressif32\tools\sdk\esp32
+
+Copied components:
+
+1. Xtensa generic headers
+   Source:
+       C:\Users\DELL\.platformio\packages\framework-arduinoespressif32\tools\sdk\esp32\include\xtensa\include\xtensa
+
+   Destination:
+       external/freertos_xtensa/include/xtensa/
+
+2. FreeRTOS Xtensa port headers
+   Source:
+       C:\Users\DELL\.platformio\packages\framework-arduinoespressif32\tools\sdk\esp32\include\freertos\port\xtensa\include\freertos
+
+   Destination:
+       external/freertos_xtensa/include/freertos/
+
+3. ESP32 FreeRTOSConfig.h
+   Source:
+       C:\Users\DELL\.platformio\packages\framework-arduinoespressif32\tools\sdk\esp32\include\freertos\include\esp_additions\freertos\FreeRTOSConfig.h
+
+   Destination:
+       external/freertos_xtensa/include/freertos/include/esp_additions/freertos/
+
+4. FreeRTOS Xtensa portasm.S
+   Source:
+       
+
+   Destination:
+       external/freertos_xtensa/src/portasm.S
+
+This directory intentionally does NOT contain the complete ESP-IDF SDK.

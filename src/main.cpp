@@ -3,105 +3,50 @@
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
 
-static vrt_task_t taskA;
-static vrt_task_t taskB;
-
-static uint32_t stackA[VRT_STACK_SIZE];
-static uint32_t stackB[VRT_STACK_SIZE];
-
-static volatile uint32_t countA = 0;
-static volatile uint32_t countB = 0;
-
 /*
- * Keep the first context-switch test completely independent
- * of Arduino's underlying FreeRTOS scheduler.
- *
- * No delay()
- * No vTaskDelay()
- * No Arduino yield()
- *
- * Just burn some CPU cycles and explicitly yield through VertexRT.
+ * --------------------------------------------------------------------------
+ * STEP 6
+ * Single-task bootstrap test
+ * --------------------------------------------------------------------------
  */
 
-static void vertex_delay_cycles(uint32_t cycles)
-{
-    for (volatile uint32_t i = 0; i < cycles; ++i)
-    {
-        __asm__ volatile("nop");
-    }
-}
+static vrt_task_t testTask;
 
-/* =========================================================
- * Task A
- * ========================================================= */
+static uint32_t testStack[VRT_STACK_SIZE];
 
-static void task_a(void *argument)
+static void bootstrap_task(void *argument)
 {
     (void)argument;
 
     Serial.println();
-    Serial.println("========== TASK A STARTED ==========");
+    Serial.println("========== BOOTSTRAP TASK STARTED ==========");
 
     for (;;)
     {
-        ++countA;
+        Serial.println("BOOTSTRAP TASK RUNNING");
 
-        Serial.print("A: ");
-        Serial.println(countA);
-
-        vertex_delay_cycles(300000);
-
-        Serial.println("A: yielding");
-
-        vrt_task_yield();
+        delay(1000);
     }
 }
-
-/* =========================================================
- * Task B
- * ========================================================= */
-
-static void task_b(void *argument)
-{
-    (void)argument;
-
-    Serial.println();
-    Serial.println("========== TASK B STARTED ==========");
-
-    for (;;)
-    {
-        ++countB;
-
-        Serial.print("B: ");
-        Serial.println(countB);
-
-        vertex_delay_cycles(300000);
-
-        Serial.println("B: yielding");
-
-        vrt_task_yield();
-    }
-}
-
-/* =========================================================
- * Setup
- * ========================================================= */
 
 void setup()
 {
     Serial.begin(115200);
-
-    /*
-     * Give the serial peripheral time to initialise.
-     * This occurs before VertexRT starts, so it does not
-     * affect the task context-switch test.
-     */
     delay(1000);
 
     Serial.println();
     Serial.println("====================================");
-    Serial.println("VERTEXRT TWO-TASK SWITCH TEST");
+    Serial.println("VertexRT STEP 6");
+    Serial.println("Single-task bootstrap test");
     Serial.println("====================================");
+
+    /*
+     * ----------------------------------------------------------------------
+     * Scheduler
+     * ----------------------------------------------------------------------
+     */
+
+    Serial.println("Initializing scheduler...");
 
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
@@ -110,148 +55,160 @@ void setup()
     {
         Serial.println("ERROR: scheduler instance is NULL.");
 
-        for (;;)
+        while (true)
         {
+            delay(1000);
         }
     }
-
-    /* -----------------------------------------------------
-     * Scheduler initialization
-     * ----------------------------------------------------- */
-
-    Serial.println("Initializing scheduler...");
 
     vrt_scheduler_init(scheduler);
 
     Serial.println("Scheduler initialized.");
 
-    /* -----------------------------------------------------
-     * Task A initialization
-     * ----------------------------------------------------- */
+    /*
+     * ----------------------------------------------------------------------
+     * Task
+     * ----------------------------------------------------------------------
+     */
 
-    Serial.println("Initializing Task A...");
-
-    vrt_task_init(
-        &taskA,
-        task_a,
-        nullptr,
-        1,
-        stackA,
-        VRT_STACK_SIZE,
-        "taskA");
-
-    if (taskA.sp == nullptr)
-    {
-        Serial.println("ERROR: Task A stack initialization failed.");
-
-        for (;;)
-        {
-        }
-    }
-
-    Serial.printf(
-        "Task A SP = %p\n",
-        (void *)taskA.sp);
-
-    Serial.println("Task A initialized.");
-
-    /* -----------------------------------------------------
-     * Task B initialization
-     * ----------------------------------------------------- */
-
-    Serial.println("Initializing Task B...");
+    Serial.println("Initializing test task...");
 
     vrt_task_init(
-        &taskB,
-        task_b,
+        &testTask,
+        bootstrap_task,
         nullptr,
         1,
-        stackB,
+        testStack,
         VRT_STACK_SIZE,
-        "taskB");
-
-    if (taskB.sp == nullptr)
-    {
-        Serial.println("ERROR: Task B stack initialization failed.");
-
-        for (;;)
-        {
-        }
-    }
+        "testTask");
 
     Serial.printf(
-        "Task B SP = %p\n",
-        (void *)taskB.sp);
+        "Task SP = %p\n",
+        (void *)testTask.sp);
 
-    Serial.println("Task B initialized.");
-
-    /* -----------------------------------------------------
-     * Add tasks to VertexRT ready queue
-     * ----------------------------------------------------- */
-
-    if (!vrt_scheduler_add_task(
-            scheduler,
-            &taskA))
+    if (testTask.sp == nullptr)
     {
-        Serial.println("ERROR: Could not add Task A.");
+        Serial.println("ERROR: Task stack initialization failed.");
 
-        for (;;)
+        while (true)
         {
+            delay(1000);
         }
     }
 
-    Serial.println("Task A added.");
-
-    if (!vrt_scheduler_add_task(
-            scheduler,
-            &taskB))
-    {
-        Serial.println("ERROR: Could not add Task B.");
-
-        for (;;)
-        {
-        }
-    }
-
-    Serial.println("Task B added.");
+    Serial.println("Task initialized.");
 
     /*
-     * The underlying Arduino FreeRTOS task remains active
-     * here only until this function transfers control to
-     * VertexRT.
+     * ----------------------------------------------------------------------
+     * Dump the initial Xtensa frame
+     * ----------------------------------------------------------------------
+     *
+     * IMPORTANT:
+     * The task stack was created using the FreeRTOS Xtensa stack
+     * initializer. We are only inspecting the resulting memory here.
      */
+
+    uint32_t *p = testTask.sp;
+
+    Serial.println();
+    Serial.println("=== INITIAL TASK FRAME ===");
+
+    Serial.printf(
+        "SP   = %p\n",
+        (void *)p);
+
+    Serial.printf(
+        "[00] = 0x%08lx  EXIT\n",
+        (unsigned long)p[0]);
+
+    Serial.printf(
+        "[01] = 0x%08lx  PC\n",
+        (unsigned long)p[1]);
+
+    Serial.printf(
+        "[02] = 0x%08lx  PS\n",
+        (unsigned long)p[2]);
+
+    Serial.printf(
+        "[03] = 0x%08lx  A0\n",
+        (unsigned long)p[3]);
+
+    Serial.printf(
+        "[04] = 0x%08lx  A1\n",
+        (unsigned long)p[4]);
+
+    Serial.printf(
+        "[05] = 0x%08lx  A2\n",
+        (unsigned long)p[5]);
+
+    Serial.printf(
+        "[06] = 0x%08lx  A3\n",
+        (unsigned long)p[6]);
+
+    Serial.printf(
+        "[09] = 0x%08lx  A6\n",
+        (unsigned long)p[9]);
+
+    Serial.printf(
+        "[10] = 0x%08lx  A7\n",
+        (unsigned long)p[10]);
+
+    Serial.println("==========================");
+
+    /*
+     * ----------------------------------------------------------------------
+     * Add task
+     * ----------------------------------------------------------------------
+     */
+
+    Serial.println("Adding test task...");
+
+    if (!vrt_scheduler_add_task(
+            scheduler,
+            &testTask))
+    {
+        Serial.println("ERROR: Could not add test task.");
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println("Task added.");
+
+    /*
+     * ----------------------------------------------------------------------
+     * Start scheduler
+     * ----------------------------------------------------------------------
+     */
+
     Serial.println();
     Serial.println("Starting VertexRT scheduler...");
-    Serial.println();
 
     vrt_scheduler_start(scheduler);
 
     /*
-     * vrt_scheduler_start() must never return.
+     * We should never return here.
      */
-    Serial.println(
-        "ERROR: VertexRT scheduler returned!");
 
-    for (;;)
+    Serial.println(
+        "ERROR: VertexRT scheduler returned unexpectedly.");
+
+    while (true)
     {
+        delay(1000);
     }
 }
-
-/* =========================================================
- * Arduino loop
- * ========================================================= */
 
 void loop()
 {
     /*
-     * VertexRT should own execution after scheduler start.
-     *
-     * Reaching loop() means something went wrong.
+     * The scheduler should take control before loop() is reached.
      */
+
     Serial.println(
         "ERROR: Arduino loop() is running.");
 
-    for (;;)
-    {
-    }
+    delay(1000);
 }
