@@ -123,9 +123,8 @@ void vrt_task_yield(void)
     }
 
     /*
-     * The scheduler only selects the next task.
-     *
-     * It does not touch CPU context.
+     * The scheduler only chooses the next task.
+     * It does not manipulate CPU context.
      */
     vrt_scheduler_schedule(scheduler);
 
@@ -139,13 +138,13 @@ void vrt_task_yield(void)
     }
 
     /*
-     * IMPORTANT:
+     * Architecture layer:
      *
-     * The assembly routine saves the current task's XtSolFrame through
-     * &current->sp and restores next->sp.
-     *
-     * It does not return to this C call site immediately; the old task
-     * continues here only when another task later switches back to it.
+     *   1. Build a solicited Xtensa frame on the current task's stack.
+     *   2. Save current->sp.
+     *   3. Restore next->sp.
+     *   4. If next is an initial task frame, enter it through _xt_user_exit.
+     *   5. If next is a solicited frame, return through retw.
      */
     vrt_port_switch_context(
         &current->sp,

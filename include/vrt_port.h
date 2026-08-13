@@ -41,12 +41,24 @@ extern "C"
         uint32_t *restoreSp);
 
     /*
-     * Restore a task without saving the current task.
+     * Restore a task without saving the current context.
      *
      * Used when a task terminates.
+     *
+     * Does not return.
      */
     void vrt_port_restore_context(uint32_t *sp)
         __attribute__((noreturn));
+
+    /*
+     * Internal low-level Xtensa solicited context switch.
+     *
+     * Arguments are passed through the architecture-owned handoff
+     * variables in vrt_port.c.
+     *
+     * Does not have a C argument list.
+     */
+    void vrt_port_yield_switch(void);
 
 #ifdef __cplusplus
 }
