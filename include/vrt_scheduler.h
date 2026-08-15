@@ -1,7 +1,9 @@
 #ifndef VRT_SCHEDULER_H
 #define VRT_SCHEDULER_H
 
-#include "vrt_types.h"
+#include <stdint.h>
+#include <stdbool.h>
+
 #include "vrt_list.h"
 #include "vrt_task.h"
 
@@ -10,93 +12,103 @@ extern "C"
 {
 #endif
 
-    /*=========================================================
-     * Scheduler Object
-     *========================================================*/
-    typedef struct vrt_scheduler
+    typedef struct vrt_scheduler vrt_scheduler_t;
+
+    struct vrt_scheduler
     {
-        /* Ready Queue */
+        /*
+         * Runnable tasks.
+         */
         vrt_list_t readyQueue;
 
-        /* Currently Running Task */
+        /*
+         * Tasks blocked waiting for their wake tick.
+         */
+        vrt_list_t delayedQueue;
+
+        /*
+         * Currently selected task.
+         */
         vrt_task_t *currentTask;
 
-        /* Idle Task */
+        /*
+         * Internal idle task.
+         */
         vrt_task_t *idleTask;
 
-        /* System Tick Counter */
+        /*
+         * Kernel tick counter.
+         */
         uint32_t tickCount;
 
-        /* Number of Registered Tasks */
+        /*
+         * Number of user tasks.
+         */
         uint32_t taskCount;
 
-        /* Scheduler State */
+        /*
+         * Scheduler running flag.
+         */
         bool running;
+    };
 
-    } vrt_scheduler_t;
-
-    /*=========================================================
+    /*
+     * ========================================================================
      * Initialization
-     *========================================================*/
-
-    /**
-     * @brief Initialize the scheduler.
+     * ========================================================================
      */
-    void vrt_scheduler_init(vrt_scheduler_t *scheduler);
 
-    /*=========================================================
-     * Task Management
-     *========================================================*/
+    void vrt_scheduler_init(
+        vrt_scheduler_t *scheduler);
 
-    /**
-     * @brief Add a task to the scheduler.
-     *
-     * @param scheduler Scheduler instance.
-     * @param task Task to register.
-     *
-     * @return true on success.
-     * @return false on failure.
+    /*
+     * ========================================================================
+     * Task management
+     * ========================================================================
      */
+
     bool vrt_scheduler_add_task(
         vrt_scheduler_t *scheduler,
         vrt_task_t *task);
 
-    /*=========================================================
-     * Scheduler Control
-     *========================================================*/
-
-    /**
-     * @brief Start the scheduler.
+    /*
+     * ========================================================================
+     * Scheduling
+     * ========================================================================
      */
-    void vrt_scheduler_start(vrt_scheduler_t *scheduler);
 
-    /**
-     * @brief Schedule the next runnable task.
-     *
-     * Selects the next task according to the
-     * scheduling policy and updates the current task.
-     *
-     * @param scheduler Pointer to the scheduler.
-     */
     void vrt_scheduler_schedule(
         vrt_scheduler_t *scheduler);
 
-    /**
-     * @brief Get the active scheduler instance.
+    /*
+     * ========================================================================
+     * Tick
+     * ========================================================================
      *
-     * @return Pointer to the active scheduler.
-     */
-    vrt_scheduler_t *vrt_scheduler_get_instance(void);
-
-    /**
-     * @brief Process one system tick.
+     * Advance the kernel by one tick.
      *
-     * Called by the hardware timer interrupt.
-     *
-     * @param scheduler Pointer to the scheduler.
+     * This is intentionally independent of a hardware timer for now.
      */
     void vrt_scheduler_tick(
         vrt_scheduler_t *scheduler);
+
+    /*
+     * ========================================================================
+     * Start
+     * ========================================================================
+     */
+
+    void vrt_scheduler_start(
+        vrt_scheduler_t *scheduler);
+
+    /*
+     * ========================================================================
+     * Global instance
+     * ========================================================================
+     */
+
+    vrt_scheduler_t *
+    vrt_scheduler_get_instance(void);
 
 #ifdef __cplusplus
 }

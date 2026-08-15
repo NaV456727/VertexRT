@@ -143,24 +143,23 @@ vrt_port_start_first_task:
 vrt_port_restore_context_asm:
 
     /*
-     * The normal windowed ABI passes the first C argument in A10.
+     * A10 = target task SP
      */
     mov     a1, a10
 
     /*
      * Determine frame type.
      *
-     * EXIT != 0  -> full XtExcFrame
-     * EXIT == 0  -> solicited XtSolFrame
+     * 0    = XtSolFrame
+     * != 0 = XtExcFrame
      */
-    l32i    a3, a1, XT_STK_EXIT
-
-    bnez    a3, .L_restore_full
+    l32i    a2, a1, XT_STK_EXIT
+    bnez    a2, .L_restore_full
 
 
 /*
  * --------------------------------------------------------------------------
- * Restore solicited frame
+ * Solicited frame
  * --------------------------------------------------------------------------
  */
 
@@ -174,21 +173,24 @@ vrt_port_restore_context_asm:
 #endif
 
     /*
-     * Restore saved PS and PC.
+     * Restore saved return PC and PS.
      */
-    l32i    a3, a1, XT_SOL_PS
     l32i    a0, a1, XT_SOL_PC
+    l32i    a2, a1, XT_SOL_PS
 
     /*
-     * Restore processor status.
-     */
-    wsr     a3, PS
-    rsync
-
-    /*
-     * Remove the solicited frame.
+     * Remove the solicited frame FIRST.
      */
     addi    a1, a1, XT_SOL_FRMSZ
+
+    /*
+     * Restore PS.
+     *
+     * Once PS is restored, execution is considered to belong entirely
+     * to the restored task.
+     */
+    wsr     a2, PS
+    rsync
 
     /*
      * Resume the task.
@@ -198,24 +200,24 @@ vrt_port_restore_context_asm:
 
 /*
  * --------------------------------------------------------------------------
- * Restore full XtExcFrame
+ * Full XtExcFrame
  * --------------------------------------------------------------------------
  */
 
 .L_restore_full:
 
     /*
-     * Restore the complete general register context.
+     * Restore all general registers from the full frame.
      */
     call0   _xt_context_restore
 
     /*
-     * Retrieve the Xtensa exit dispatcher.
+     * Load the saved exit dispatcher.
      */
     l32i    a0, a1, XT_STK_EXIT
 
     /*
-     * Transfer to the saved exit dispatcher.
+     * Never return through the caller's stack frame.
      */
     jx      a0
 
