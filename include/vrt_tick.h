@@ -1,68 +1,35 @@
 #ifndef VRT_TICK_H
 #define VRT_TICK_H
 
-#include "vrt_types.h"
+#include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-    /*=========================================================
-     * Tick Configuration
-     *=========================================================*/
-
-#define VRT_TICK_RATE_HZ 1000U
-
-    /*=========================================================
-     * Tick Initialization
-     *=========================================================*/
-
-    /**
-     * @brief Initialize the VertexRT system tick.
+    /*
+     * Initialize the VertexRT hardware tick using VRT_TICK_HZ.
      *
-     * Configures the hardware timer used by VertexRT.
+     * Does not start the timer.
      */
-    void vrt_tick_init(void);
+    bool vrt_tick_init(void);
 
-    /*=========================================================
-     * Tick Control
-     *=========================================================*/
-
-    /**
-     * @brief Start the system tick.
-     *
-     * Starts the hardware timer after the kernel
-     * has been initialized.
+    /*
+     * Start periodic hardware ticks.
      */
-    void vrt_tick_start(void);
+    bool vrt_tick_start(void);
 
-    /**
-     * @brief Stop the system tick.
-     *
-     * Stops the hardware timer.
+    /*
+     * Stop hardware ticks.
      */
-    void vrt_tick_stop(void);
+    bool vrt_tick_stop(void);
 
-    /*=========================================================
-     * Tick Information
-     *=========================================================*/
-
-    /**
-     * @brief Get the current system tick count.
-     *
-     * @return Number of system ticks since the tick system
-     *         was started.
+    /*
+     * Return configured tick frequency.
      */
-    uint32_t vrt_tick_get_count(void);
-
-    /**
-     * @brief Process one system tick.
-     *
-     * This function is called by the hardware timer
-     * interrupt handler.
-     */
-    void vrt_tick_handler(void);
+    uint32_t vrt_tick_get_frequency(void);
 
 #ifdef __cplusplus
 }

@@ -35,6 +35,8 @@
 .extern _xt_context_restore
 .extern xthal_window_spill_nw
 .extern _xt_user_exit
+.extern _xt_context_save
+.extern vrt_scheduler_tick_from_isr
 
 
 /*
@@ -477,3 +479,137 @@ vrt_port_yield_switch:
 
 
 .size vrt_port_yield_switch, .-vrt_port_yield_switch
+
+/*
+ * ============================================================================
+ * vrt_port_preempt_from_isr
+ *
+ * Prepare the active Xtensa interrupt frame for a VertexRT task switch.
+ *
+ * This function DOES return to the timer ISR.
+ *
+ * The ESP32 interrupt machinery will subsequently execute:
+ *
+ *     _frxt_int_exit()
+ *         -> _xt_context_restore()
+ *
+ * We therefore replace the interrupted task's XtExcFrame in-place with
+ * the selected task's saved XtExcFrame.
+ *
+ * Entry:
+ *
+ *     vrt_port_current_sp = &currentTask->sp
+ *     vrt_port_next_sp    = nextTask->sp
+ *
+ * EXCSAVE1:
+ *
+ *     points to the real interrupted XtExcFrame.
+ * ============================================================================
+ */
+
+.global vrt_port_preempt_from_isr
+.type   vrt_port_preempt_from_isr, @function
+.align  4
+
+vrt_port_preempt_from_isr:
+
+    /*
+     * Normal call from the timer ISR.
+     */
+    entry   a1, 32
+
+
+    /*
+     * ------------------------------------------------------------------------
+     * Get the real interrupted XtExcFrame.
+     * ------------------------------------------------------------------------
+     *
+     * _xt_lowint1 stores the active exception-frame pointer in EXCSAVE1.
+     */
+    rsr.excsave1 a6
+
+
+    /*
+     * ------------------------------------------------------------------------
+     * Save interrupted task's frame pointer.
+     * ------------------------------------------------------------------------
+     *
+     * vrt_port_current_sp == &currentTask->sp
+     */
+    movi    a2, vrt_port_current_sp
+    l32i    a2, a2, 0
+
+    s32i    a6, a2, 0
+
+
+    /*
+     * ------------------------------------------------------------------------
+     * Get next task's saved XtExcFrame.
+     * ------------------------------------------------------------------------
+     */
+    movi    a2, vrt_port_next_sp
+    l32i    a7, a2, 0
+
+
+    /*
+     * ------------------------------------------------------------------------
+     * Only full XtExcFrames are supported by the interrupt preemption path.
+     *
+     * EXIT == 0 means XtSolFrame.
+     */
+    l32i    a2, a7, XT_STK_EXIT
+    beqz    a2, .L_preempt_return
+
+
+    /*
+     * ------------------------------------------------------------------------
+     * Copy XtExcFrame.
+     * ------------------------------------------------------------------------
+     *
+     * IMPORTANT:
+     *
+     * Use XT_STK_NEXT1, which is the actual XtExcFrame size.
+     *
+     * Do NOT use XT_STK_FRMSZ here. XT_STK_FRMSZ includes additional
+     * interrupt-stack padding that is not part of the task's saved frame.
+     */
+    mov     a8, a6
+    mov     a9, a7
+
+    movi    a10, XT_STK_NEXT1
+    srli    a10, a10, 2
+
+
+.L_preempt_copy:
+
+    beqz    a10, .L_preempt_copy_done
+
+    l32i    a11, a9, 0
+    s32i    a11, a8, 0
+
+    addi    a9, a9, 4
+    addi    a8, a8, 4
+    addi    a10, a10, -1
+
+    j       .L_preempt_copy
+
+
+.L_preempt_copy_done:
+
+    /*
+     * Ensure the frame writes are visible before returning to the
+     * interrupt-exit machinery.
+     */
+    memw
+
+
+.L_preempt_return:
+
+    /*
+     * Return to vrt_preempt_timer_isr().
+     *
+     * _frxt_int_exit() will later restore the modified frame.
+     */
+    retw
+
+.size vrt_port_preempt_from_isr, .-vrt_port_preempt_from_isr

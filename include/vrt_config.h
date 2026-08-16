@@ -10,4 +10,6 @@
 
 #define VRT_BASE_SAVE_AREA_SIZE 0x20u
 
+#define VRT_TICK_HZ 100
+
 #endif

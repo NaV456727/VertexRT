@@ -60,6 +60,24 @@ extern "C"
      */
     void vrt_port_yield_switch(void);
 
+    /*
+     * Prepare the architecture layer for an ISR-driven context switch.
+     *
+     * currentSpOut = &currentTask->sp
+     * nextSp       = nextTask->sp
+     */
+    void vrt_port_prepare_preemption(
+        uint32_t **currentSpOut,
+        uint32_t *nextSp);
+
+    /*
+     * Enter the VertexRT preemption path from an Xtensa interrupt.
+     *
+     * The function does not return to the ISR.
+     * It restores the selected VertexRT task directly.
+     */
+    void vrt_port_preempt_from_isr(void);
+
 #ifdef __cplusplus
 }
 #endif

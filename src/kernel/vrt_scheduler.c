@@ -1,6 +1,8 @@
 #include "vrt_scheduler.h"
 #include "vrt_port.h"
 #include "vrt_config.h"
+#include "esp_attr.h"
+#include "vrt_freertos_backend.h"
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -188,6 +190,9 @@ void vrt_scheduler_init(
     scheduler->running =
         false;
 
+    scheduler->preemptionPending =
+        false;
+
     /*
      * Initialize idle task.
      */
@@ -214,6 +219,8 @@ void vrt_scheduler_init(
 
     scheduler->currentTask =
         scheduler->idleTask;
+
+    vrt_freertos_backend_init();
 }
 
 /*
@@ -253,6 +260,15 @@ bool vrt_scheduler_add_task(
             &scheduler->readyQueue,
             &task->node))
     {
+        return false;
+    }
+
+    if (!vrt_freertos_backend_register_task(task))
+    {
+        vrt_list_remove(
+            &scheduler->readyQueue,
+            &task->node);
+
         return false;
     }
 
@@ -356,12 +372,18 @@ void vrt_scheduler_schedule(
  * Scheduler tick
  * ============================================================================
  *
- * Cooperative/manual tick for Step 11.
- *
  * One call advances the kernel by exactly one tick.
  *
  * Blocked tasks whose wakeTick has arrived are moved from delayedQueue back
  * to readyQueue.
+ *
+ * If another READY task should run, the tick sets preemptionPending.
+ *
+ * IMPORTANT:
+ *
+ * The tick does NOT perform a context switch.
+ * The actual context switch occurs later at a safe VertexRT
+ * scheduling boundary.
  * ============================================================================
  */
 
@@ -373,19 +395,24 @@ void vrt_scheduler_tick(
         return;
     }
 
+    /*
+     * Advance kernel time.
+     */
     scheduler->tickCount++;
 
+    if (!scheduler->running)
+    {
+        return;
+    }
+
     /*
-     * Walk the delayed queue.
+     * Wake delayed tasks.
      */
     vrt_list_node_t *node =
         scheduler->delayedQueue.head;
 
     while (node != NULL)
     {
-        /*
-         * Save next before removing the current node.
-         */
         vrt_list_node_t *nextNode =
             node->next;
 
@@ -395,44 +422,234 @@ void vrt_scheduler_tick(
         if (task != NULL &&
             task->state == VRT_TASK_BLOCKED)
         {
-            /*
-             * Signed-difference comparison handles uint32_t wraparound.
-             *
-             * Task is due when:
-             *
-             *     currentTick - wakeTick >= 0
-             */
             int32_t remaining =
                 (int32_t)(task->wakeTick -
                           scheduler->tickCount);
 
             if (remaining <= 0)
             {
-                /*
-                 * Remove from delayed queue.
-                 */
                 vrt_list_remove(
                     &scheduler->delayedQueue,
                     &task->waitNode);
 
-                /*
-                 * Make runnable.
-                 */
                 task->state =
                     VRT_TASK_READY;
 
-                /*
-                 * Reinsert into ready queue.
-                 */
                 vrt_list_push_back(
                     &scheduler->readyQueue,
                     &task->node);
             }
         }
 
-        node =
-            nextNode;
+        node = nextNode;
     }
+
+    /*
+     * Determine whether another runnable task exists.
+     */
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current == NULL ||
+        current == scheduler->idleTask)
+    {
+        return;
+    }
+
+    /*
+     * Look for another READY task.
+     */
+    vrt_list_node_t *readyNode =
+        scheduler->readyQueue.head;
+
+    while (readyNode != NULL)
+    {
+        vrt_task_t *task =
+            (vrt_task_t *)readyNode->owner;
+
+        if (task != NULL &&
+            task != current &&
+            task->state == VRT_TASK_READY)
+        {
+            scheduler->preemptionPending = true;
+            return;
+        }
+
+        readyNode =
+            readyNode->next;
+    }
+}
+
+void IRAM_ATTR vrt_scheduler_tick_from_isr(void)
+{
+    vrt_scheduler_t *scheduler =
+        &vrt_scheduler;
+
+    /*
+     * ISR-safe minimal tick path.
+     */
+    scheduler->tickCount++;
+
+    if (!scheduler->running)
+    {
+        return;
+    }
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current == NULL ||
+        current == scheduler->idleTask)
+    {
+        return;
+    }
+
+    vrt_list_node_t *node =
+        scheduler->readyQueue.head;
+
+    while (node != NULL)
+    {
+        vrt_task_t *task =
+            (vrt_task_t *)node->owner;
+
+        if (task != NULL &&
+            task != current &&
+            task->state == VRT_TASK_READY)
+        {
+            scheduler->preemptionPending = true;
+            return;
+        }
+
+        node = node->next;
+    }
+}
+
+bool vrt_scheduler_preemption_pending(
+    vrt_scheduler_t *scheduler)
+{
+    if (scheduler == NULL)
+    {
+        return false;
+    }
+
+    return scheduler->preemptionPending;
+}
+
+void vrt_scheduler_clear_preemption(
+    vrt_scheduler_t *scheduler)
+{
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    scheduler->preemptionPending = false;
+}
+
+/*
+ * ============================================================================
+ * Select next task from ISR
+ * ============================================================================
+ *
+ * The ISR asks the VertexRT scheduler which READY task should run next.
+ *
+ * This function ONLY changes VertexRT scheduler state.
+ * It does not perform a CPU context switch.
+ * ============================================================================
+ */
+
+vrt_task_t *IRAM_ATTR
+vrt_scheduler_select_preemption_from_isr(void)
+{
+    vrt_scheduler_t *scheduler =
+        &vrt_scheduler;
+
+    if (!scheduler->running)
+    {
+        return NULL;
+    }
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current == NULL ||
+        current == scheduler->idleTask)
+    {
+        return NULL;
+    }
+
+    /*
+     * Search after the current task.
+     */
+    vrt_list_node_t *node =
+        current->node.next;
+
+    while (node != NULL)
+    {
+        vrt_task_t *next =
+            (vrt_task_t *)node->owner;
+
+        if (next != NULL &&
+            next != current &&
+            next->state == VRT_TASK_READY)
+        {
+            current->state =
+                VRT_TASK_READY;
+
+            next->state =
+                VRT_TASK_RUNNING;
+
+            scheduler->currentTask =
+                next;
+
+            scheduler->preemptionPending =
+                false;
+
+            return next;
+        }
+
+        node =
+            node->next;
+    }
+
+    /*
+     * Wrap around to the beginning.
+     */
+    node =
+        scheduler->readyQueue.head;
+
+    while (node != NULL)
+    {
+        vrt_task_t *next =
+            (vrt_task_t *)node->owner;
+
+        if (next != NULL &&
+            next != current &&
+            next->state == VRT_TASK_READY)
+        {
+            current->state =
+                VRT_TASK_READY;
+
+            next->state =
+                VRT_TASK_RUNNING;
+
+            scheduler->currentTask =
+                next;
+
+            scheduler->preemptionPending =
+                false;
+
+            return next;
+        }
+
+        node =
+            node->next;
+    }
+
+    scheduler->preemptionPending =
+        false;
+
+    return NULL;
 }
 
 /*

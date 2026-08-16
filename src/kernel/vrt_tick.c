@@ -1,104 +1,174 @@
 #include "vrt_tick.h"
+
 #include "vrt_scheduler.h"
+#include "vrt_config.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-/*=========================================================
- * Tick State
- *=========================================================*/
+#include "esp_timer.h"
 
-static volatile uint32_t vrt_tick_count = 0;
+/*
+ * ============================================================================
+ * VertexRT hardware tick
+ * ============================================================================
+ *
+ * Step 12:
+ *
+ *     ESP timer
+ *         ↓
+ *     vrt_tick_callback()
+ *         ↓
+ *     vrt_scheduler_tick()
+ *
+ * No context switching is performed from the timer yet.
+ * ============================================================================
+ */
 
-static hw_timer_t *vrt_timer = NULL;
+static esp_timer_handle_t vrt_tick_timer = NULL;
 
-/*=========================================================
- * Tick Handler
- *=========================================================*/
+static uint32_t vrt_tick_frequency_hz = 0U;
 
-void vrt_tick_handler(void)
+static bool vrt_tick_initialized = false;
+
+/*
+ * ============================================================================
+ * Timer callback
+ * ============================================================================
+ */
+
+static void vrt_tick_callback(void *argument)
 {
-    vrt_tick_count++;
+    (void)argument;
 
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    if (scheduler != NULL)
-    {
-        vrt_scheduler_tick(scheduler);
-    }
-}
-
-/*=========================================================
- * Tick Interrupt Handler
- *=========================================================*/
-
-static void IRAM_ATTR vrt_tick_isr(void)
-{
-    vrt_tick_handler();
-}
-
-/*=========================================================
- * Initialization
- *=========================================================*/
-
-void vrt_tick_init(void)
-{
-    vrt_tick_count = 0;
-
-    vrt_timer = timerBegin(
-        0,
-        80,
-        true);
-
-    if (vrt_timer == NULL)
+    if (scheduler == NULL)
     {
         return;
     }
 
-    timerAttachInterrupt(
-        vrt_timer,
-        &vrt_tick_isr,
-        false);
-
-    timerAlarmWrite(
-        vrt_timer,
-        1000,
-        true);
+    /*
+     * Advance exactly one VertexRT kernel tick.
+     */
+    vrt_scheduler_tick(
+        scheduler);
 }
 
-/*=========================================================
+/*
+ * ============================================================================
+ * Initialize
+ * ============================================================================
+ */
+
+bool vrt_tick_init(void)
+{
+    if (vrt_tick_initialized)
+    {
+        return true;
+    }
+
+    /*
+     * Use the project's configured kernel tick frequency.
+     */
+    if (VRT_TICK_HZ == 0U)
+    {
+        return false;
+    }
+
+    uint64_t period_us =
+        1000000ULL /
+        (uint64_t)VRT_TICK_HZ;
+
+    /*
+     * esp_timer has microsecond resolution.
+     */
+    if (period_us == 0ULL)
+    {
+        return false;
+    }
+
+    esp_timer_create_args_t timer_args = {
+        .callback = &vrt_tick_callback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "vrt_tick"};
+
+    esp_err_t err =
+        esp_timer_create(
+            &timer_args,
+            &vrt_tick_timer);
+
+    if (err != ESP_OK)
+    {
+        vrt_tick_timer = NULL;
+        return false;
+    }
+
+    vrt_tick_frequency_hz =
+        VRT_TICK_HZ;
+
+    vrt_tick_initialized =
+        true;
+
+    return true;
+}
+
+/*
+ * ============================================================================
  * Start
- *=========================================================*/
+ * ============================================================================
+ */
 
-void vrt_tick_start(void)
+bool vrt_tick_start(void)
 {
-    if (vrt_timer == NULL)
+    if (!vrt_tick_initialized ||
+        vrt_tick_timer == NULL)
     {
-        return;
+        return false;
     }
 
-    timerAlarmEnable(vrt_timer);
+    uint64_t period_us =
+        1000000ULL /
+        (uint64_t)vrt_tick_frequency_hz;
+
+    esp_err_t err =
+        esp_timer_start_periodic(
+            vrt_tick_timer,
+            period_us);
+
+    return err == ESP_OK;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Stop
- *=========================================================*/
+ * ============================================================================
+ */
 
-void vrt_tick_stop(void)
+bool vrt_tick_stop(void)
 {
-    if (vrt_timer == NULL)
+    if (!vrt_tick_initialized ||
+        vrt_tick_timer == NULL)
     {
-        return;
+        return false;
     }
 
-    timerAlarmDisable(vrt_timer);
+    esp_err_t err =
+        esp_timer_stop(
+            vrt_tick_timer);
+
+    return err == ESP_OK;
 }
 
-/*=========================================================
- * Tick Count
- *=========================================================*/
+/*
+ * ============================================================================
+ * Frequency
+ * ============================================================================
+ */
 
-uint32_t vrt_tick_get_count(void)
+uint32_t vrt_tick_get_frequency(void)
 {
-    return vrt_tick_count;
+    return vrt_tick_frequency_hz;
 }

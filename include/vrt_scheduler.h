@@ -50,6 +50,12 @@ extern "C"
          * Scheduler running flag.
          */
         bool running;
+
+        /*
+         * Set by the tick when another task should preempt
+         * the currently running task.
+         */
+        bool preemptionPending;
     };
 
     /*
@@ -84,13 +90,25 @@ extern "C"
      * ========================================================================
      * Tick
      * ========================================================================
-     *
-     * Advance the kernel by one tick.
-     *
-     * This is intentionally independent of a hardware timer for now.
      */
+
     void vrt_scheduler_tick(
         vrt_scheduler_t *scheduler);
+
+    /*
+     * ========================================================================
+     * Preemption request
+     * ========================================================================
+     */
+
+    bool vrt_scheduler_preemption_pending(
+        vrt_scheduler_t *scheduler);
+
+    void vrt_scheduler_clear_preemption(
+        vrt_scheduler_t *scheduler);
+
+    vrt_task_t *vrt_scheduler_select_preemption_from_isr(
+        void);
 
     /*
      * ========================================================================
@@ -109,6 +127,8 @@ extern "C"
 
     vrt_scheduler_t *
     vrt_scheduler_get_instance(void);
+
+    void vrt_scheduler_tick_from_isr(void);
 
 #ifdef __cplusplus
 }

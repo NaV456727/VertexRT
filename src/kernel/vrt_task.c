@@ -149,8 +149,18 @@ void vrt_task_yield(void)
     }
 
     /*
-     * Select the next runnable task.
+     * A hardware tick may have requested preemption.
+     *
+     * Clear the request now because we are entering the safe
+     * architecture-level context-switch boundary.
      */
+    if (vrt_scheduler_preemption_pending(
+            scheduler))
+    {
+        vrt_scheduler_clear_preemption(
+            scheduler);
+    }
+
     vrt_scheduler_schedule(
         scheduler);
 
@@ -163,9 +173,6 @@ void vrt_task_yield(void)
         return;
     }
 
-    /*
-     * Save current context and restore next.
-     */
     vrt_port_switch_context(
         &current->sp,
         next->sp);
