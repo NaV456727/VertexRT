@@ -1,11 +1,14 @@
 #include "vrt_sync.h"
 #include "vrt_scheduler.h"
+#include "vrt_freertos_backend.h"
 
 #include <stddef.h>
 
-/*=========================================================
+/*
+ * ============================================================================
  * Binary Semaphore
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_sem_init(
     vrt_sem_t *sem,
@@ -23,9 +26,11 @@ void vrt_sem_init(
         &sem->waitQueue);
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Semaphore Wait
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_sem_wait(
     vrt_sem_t *sem)
@@ -43,8 +48,11 @@ void vrt_sem_wait(
         return;
     }
 
+    /*
+     * Use the task that is actually executing.
+     */
     vrt_task_t *current =
-        scheduler->currentTask;
+        vrt_freertos_backend_get_current_task();
 
     if (current == NULL)
     {
@@ -60,6 +68,13 @@ void vrt_sem_wait(
     }
 
     /*
+     * Keep scheduler state synchronized with
+     * the actual executing task.
+     */
+    scheduler->currentTask =
+        current;
+
+    /*
      * Semaphore available.
      */
     if (sem->count > 0U)
@@ -71,48 +86,74 @@ void vrt_sem_wait(
     /*
      * Semaphore unavailable.
      *
-     * Block the current task.
+     * Block current task.
      */
     current->state =
         VRT_TASK_BLOCKED;
 
     /*
-     * Put the task on the semaphore wait queue.
+     * Remove from the runnable queue.
+     */
+    vrt_list_remove(
+        &scheduler->readyQueue,
+        &current->node);
+
+    /*
+     * Add to semaphore wait queue.
      */
     if (!vrt_list_push_back(
             &sem->waitQueue,
             &current->waitNode))
     {
         /*
-         * Failed to queue the task.
-         *
-         * Restore READY state.
+         * Roll back if the wait queue insertion failed.
          */
         current->state =
-            VRT_TASK_READY;
+            VRT_TASK_RUNNING;
+
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
 
         return;
     }
 
     /*
-     * Current task is no longer runnable.
+     * Select another runnable task.
      */
-    scheduler->currentTask = NULL;
+    scheduler->currentTask =
+        current;
 
-    /*
-     * Select another task.
-     *
-     * Actual CPU switching will be performed
-     * by the port layer once context switching
-     * is connected.
-     */
     vrt_scheduler_schedule(
         scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    /*
+     * Switch the actual FreeRTOS execution context.
+     */
+    if (next != NULL &&
+        next != current)
+    {
+        vrt_freertos_backend_switch_to(
+            next);
+    }
+
+    /*
+     * Suspend the actual backing task.
+     *
+     * This task resumes when vrt_sem_signal()
+     * wakes it.
+     */
+    vrt_freertos_backend_block_current();
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Semaphore Signal
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_sem_signal(
     vrt_sem_t *sem)
@@ -160,23 +201,20 @@ void vrt_sem_signal(
             &task->waitNode);
 
         /*
-         * Put task back into READY state.
+         * Make runnable.
          */
         task->state =
             VRT_TASK_READY;
 
         /*
-         * Return task to scheduler ready queue.
+         * Return task to ready queue.
          */
         if (!vrt_list_push_back(
                 &scheduler->readyQueue,
                 &task->node))
         {
             /*
-             * Ready queue insertion failed.
-             *
-             * Restore BLOCKED state and put the
-             * task back onto the semaphore queue.
+             * Roll back if insertion failed.
              */
             task->state =
                 VRT_TASK_BLOCKED;
@@ -189,11 +227,19 @@ void vrt_sem_signal(
         }
 
         /*
-         * Semaphore ownership is transferred directly
-         * to the woken task.
-         *
-         * Therefore count remains zero.
+         * Wake the actual FreeRTOS backing task.
          */
+        vrt_freertos_backend_wake_task(
+            task);
+
+        /*
+         * Direct ownership transfer.
+         *
+         * Semaphore remains unavailable because the
+         * woken task is effectively receiving it.
+         */
+        sem->count = 0U;
+
         return;
     }
 
@@ -205,9 +251,11 @@ void vrt_sem_signal(
     sem->count = 1U;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Mutex Initialization
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_mutex_init(
     vrt_mutex_t *mutex)
@@ -224,9 +272,11 @@ void vrt_mutex_init(
         &mutex->waitQueue);
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Mutex Lock
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_mutex_lock(
     vrt_mutex_t *mutex)
@@ -244,8 +294,11 @@ void vrt_mutex_lock(
         return;
     }
 
+    /*
+     * Use the actual executing VertexRT task.
+     */
     vrt_task_t *current =
-        scheduler->currentTask;
+        vrt_freertos_backend_get_current_task();
 
     if (current == NULL)
     {
@@ -261,6 +314,12 @@ void vrt_mutex_lock(
     }
 
     /*
+     * Keep scheduler state synchronized.
+     */
+    scheduler->currentTask =
+        current;
+
+    /*
      * Mutex is free.
      */
     if (!mutex->locked)
@@ -274,7 +333,7 @@ void vrt_mutex_lock(
     /*
      * Current task already owns this mutex.
      *
-     * We are not implementing recursive mutexes yet.
+     * Recursive mutexes are not supported yet.
      */
     if (mutex->owner == current)
     {
@@ -290,33 +349,65 @@ void vrt_mutex_lock(
         VRT_TASK_BLOCKED;
 
     /*
-     * Add task to mutex wait queue.
+     * Remove from ready queue.
+     */
+    vrt_list_remove(
+        &scheduler->readyQueue,
+        &current->node);
+
+    /*
+     * Add to mutex wait queue.
      */
     if (!vrt_list_push_back(
             &mutex->waitQueue,
             &current->waitNode))
     {
+        /*
+         * Roll back on failure.
+         */
         current->state =
-            VRT_TASK_READY;
+            VRT_TASK_RUNNING;
+
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
 
         return;
     }
 
     /*
-     * Current task is no longer running.
+     * Select another runnable task.
      */
-    scheduler->currentTask = NULL;
+    scheduler->currentTask =
+        current;
 
-    /*
-     * Select another task.
-     */
     vrt_scheduler_schedule(
         scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    /*
+     * Switch actual FreeRTOS execution.
+     */
+    if (next != NULL &&
+        next != current)
+    {
+        vrt_freertos_backend_switch_to(
+            next);
+    }
+
+    /*
+     * Block the actual backing task.
+     */
+    vrt_freertos_backend_block_current();
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Mutex Unlock
- *=========================================================*/
+ * ============================================================================
+ */
 
 void vrt_mutex_unlock(
     vrt_mutex_t *mutex)
@@ -334,16 +425,22 @@ void vrt_mutex_unlock(
         return;
     }
 
+    /*
+     * Use the actual executing task.
+     */
     vrt_task_t *current =
-        scheduler->currentTask;
+        vrt_freertos_backend_get_current_task();
 
     if (current == NULL)
     {
         return;
     }
 
+    scheduler->currentTask =
+        current;
+
     /*
-     * Only the owner may unlock the mutex.
+     * Only the owner may unlock.
      */
     if (mutex->owner != current)
     {
@@ -351,8 +448,7 @@ void vrt_mutex_unlock(
     }
 
     /*
-     * If another task is waiting, transfer
-     * ownership directly to it.
+     * If another task is waiting, transfer ownership.
      */
     if (!vrt_list_is_empty(
             &mutex->waitQueue))
@@ -381,21 +477,20 @@ void vrt_mutex_unlock(
             &next->waitNode);
 
         /*
-         * Return task to READY state.
+         * Make runnable.
          */
         next->state =
             VRT_TASK_READY;
 
         /*
-         * Return task to scheduler queue.
+         * Add to ready queue.
          */
         if (!vrt_list_push_back(
                 &scheduler->readyQueue,
                 &next->node))
         {
             /*
-             * Failed to make task runnable.
-             * Keep it blocked and preserve ownership.
+             * Roll back on failure.
              */
             next->state =
                 VRT_TASK_BLOCKED;
@@ -410,8 +505,17 @@ void vrt_mutex_unlock(
         /*
          * Transfer ownership directly.
          */
-        mutex->owner = next;
-        mutex->locked = true;
+        mutex->owner =
+            next;
+
+        mutex->locked =
+            true;
+
+        /*
+         * Wake actual FreeRTOS backing task.
+         */
+        vrt_freertos_backend_wake_task(
+            next);
 
         return;
     }
@@ -419,8 +523,11 @@ void vrt_mutex_unlock(
     /*
      * Nobody is waiting.
      *
-     * Completely release mutex.
+     * Fully release mutex.
      */
-    mutex->owner = NULL;
-    mutex->locked = false;
+    mutex->owner =
+        NULL;
+
+    mutex->locked =
+        false;
 }

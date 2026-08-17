@@ -1,6 +1,7 @@
 #include "vrt_task.h"
 #include "vrt_scheduler.h"
 #include "vrt_port.h"
+#include "vrt_freertos_backend.h"
 
 #include <string.h>
 
@@ -191,74 +192,81 @@ void vrt_task_exit(void)
 
     if (scheduler == NULL)
     {
-        for (;;)
-        {
-        }
+        return;
     }
 
     vrt_task_t *current =
-        scheduler->currentTask;
+        vrt_freertos_backend_get_current_task();
 
     if (current == NULL ||
-        current == scheduler->idleTask)
+        current == scheduler->idleTask ||
+        current->isIdle)
     {
-        for (;;)
-        {
-        }
+        return;
     }
 
     /*
+     * ------------------------------------------------------------------------
      * Mark terminated.
+     * ------------------------------------------------------------------------
      */
+
     current->state =
         VRT_TASK_TERMINATED;
 
     /*
+     * ------------------------------------------------------------------------
      * Remove from ready queue.
+     * ------------------------------------------------------------------------
+     *
+     * A running task remains in readyQueue in the current scheduler model.
      */
+
     vrt_list_remove(
         &scheduler->readyQueue,
         &current->node);
 
+    /*
+     * Keep task count consistent.
+     */
     if (scheduler->taskCount > 0U)
     {
         scheduler->taskCount--;
     }
 
-    /*
-     * Tell scheduler there is no currently-running task.
-     */
     scheduler->currentTask =
-        NULL;
+        current;
 
     /*
+     * ------------------------------------------------------------------------
      * Select another runnable task.
+     * ------------------------------------------------------------------------
+     *
+     * scheduler->currentTask still points to the terminated task,
+     * so scheduler_schedule() will select another READY task.
      */
+
     vrt_scheduler_schedule(
         scheduler);
 
     vrt_task_t *next =
         scheduler->currentTask;
 
-    if (next == NULL)
+    /*
+     * ------------------------------------------------------------------------
+     * Leave the current FreeRTOS backing task.
+     * ------------------------------------------------------------------------
+     */
+
+    if (next != NULL &&
+        next != current)
     {
-        for (;;)
-        {
-        }
+        vrt_freertos_backend_exit_current(
+            next);
     }
 
     /*
-     * Use the already-proven context switch path.
-     *
-     * The terminated task's context may be saved, but it can never
-     * be scheduled again.
-     */
-    vrt_port_switch_context(
-        &current->sp,
-        next->sp);
-
-    /*
-     * Should never execute.
+     * Should never return.
      */
     for (;;)
     {
@@ -271,7 +279,8 @@ void vrt_task_exit(void)
  * ============================================================================
  */
 
-void vrt_task_suspend(vrt_task_t *task)
+void vrt_task_suspend(
+    vrt_task_t *task)
 {
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
@@ -282,44 +291,78 @@ void vrt_task_suspend(vrt_task_t *task)
         return;
     }
 
-    if (task->state != VRT_TASK_READY &&
-        task->state != VRT_TASK_RUNNING)
+    /*
+     * Idle task cannot be suspended.
+     */
+    if (task == scheduler->idleTask ||
+        task->isIdle)
     {
         return;
     }
 
     /*
-     * Remove from ready queue.
-     *
-     * This is only valid if the task is actually linked there.
+     * Already suspended.
      */
-    vrt_list_remove(
-        &scheduler->readyQueue,
-        &task->node);
+    if (task->state ==
+        VRT_TASK_SUSPENDED)
+    {
+        return;
+    }
+
+    /*
+     * Remove from ready queue if present.
+     */
+    if (task->state ==
+            VRT_TASK_READY ||
+        task->state ==
+            VRT_TASK_RUNNING)
+    {
+        vrt_list_remove(
+            &scheduler->readyQueue,
+            &task->node);
+    }
 
     task->state =
         VRT_TASK_SUSPENDED;
 
     /*
-     * If this is the current task, switch away from it.
+     * Suspend the actual FreeRTOS backing task.
+     */
+    vrt_freertos_backend_suspend_task(
+        task);
+
+    /*
+     * If the suspended task was the currently
+     * executing VertexRT task, select another task.
      */
     if (scheduler->currentTask == task)
     {
+        vrt_task_t *previous =
+            task;
+
+        (void)previous;
+
+        /*
+         * Clear current selection temporarily so
+         * scheduler_schedule() searches for another
+         * READY task instead of retaining this task.
+         */
         scheduler->currentTask =
-            NULL;
+            scheduler->idleTask;
+
+        scheduler->idleTask->state =
+            VRT_TASK_RUNNING;
 
         vrt_scheduler_schedule(
             scheduler);
 
-        vrt_task_t *next =
-            scheduler->currentTask;
-
-        if (next != NULL &&
-            next != task)
+        if (scheduler->currentTask != NULL &&
+            scheduler->currentTask != task &&
+            scheduler->currentTask !=
+                scheduler->idleTask)
         {
-            vrt_port_switch_context(
-                &task->sp,
-                next->sp);
+            vrt_freertos_backend_switch_to(
+                scheduler->currentTask);
         }
     }
 }
@@ -330,7 +373,8 @@ void vrt_task_suspend(vrt_task_t *task)
  * ============================================================================
  */
 
-void vrt_task_resume(vrt_task_t *task)
+void vrt_task_resume(
+    vrt_task_t *task)
 {
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
@@ -341,20 +385,47 @@ void vrt_task_resume(vrt_task_t *task)
         return;
     }
 
-    if (task->state != VRT_TASK_SUSPENDED)
+    if (task->state !=
+        VRT_TASK_SUSPENDED)
     {
         return;
     }
 
-    if (!vrt_list_push_back(
-            &scheduler->readyQueue,
-            &task->node))
-    {
-        return;
-    }
-
+    /*
+     * Make the task READY again.
+     */
     task->state =
         VRT_TASK_READY;
+
+    vrt_list_push_back(
+        &scheduler->readyQueue,
+        &task->node);
+
+    /*
+     * Make the backing FreeRTOS task runnable.
+     */
+    vrt_freertos_backend_resume_task(
+        task);
+
+    /*
+     * If the scheduler currently has no user task,
+     * allow the resumed task to become current.
+     */
+    if (scheduler->currentTask ==
+            NULL ||
+        scheduler->currentTask ==
+            scheduler->idleTask)
+    {
+        vrt_scheduler_schedule(
+            scheduler);
+
+        if (scheduler->currentTask ==
+            task)
+        {
+            vrt_freertos_backend_switch_to(
+                task);
+        }
+    }
 }
 
 /*
@@ -378,22 +449,24 @@ void vrt_task_delay(
         vrt_scheduler_get_instance();
 
     if (scheduler == NULL ||
-        !scheduler->running)
+        scheduler->currentTask == NULL)
     {
         return;
     }
 
-    vrt_task_t *current =
-        scheduler->currentTask;
+    vrt_task_t *task =
+        vrt_freertos_backend_get_current_task();
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (task == NULL)
     {
         return;
     }
+
+    scheduler->currentTask =
+        task;
 
     /*
-     * A zero-tick delay is simply a yield.
+     * Zero-delay is simply a normal yield.
      */
     if (ticks == 0U)
     {
@@ -402,73 +475,45 @@ void vrt_task_delay(
     }
 
     /*
-     * Remove current task from runnable queue.
+     * Do not allow the idle task to block.
      */
-    vrt_list_remove(
-        &scheduler->readyQueue,
-        &current->node);
-
-    /*
-     * Compute wake-up tick.
-     *
-     * Unsigned wraparound is intentional and the tick comparison in
-     * vrt_scheduler_tick() uses signed-difference semantics.
-     */
-    current->wakeTick =
-        scheduler->tickCount + ticks;
-
-    current->state =
-        VRT_TASK_BLOCKED;
-
-    /*
-     * Put task on delayed queue.
-     */
-    if (!vrt_list_push_back(
-            &scheduler->delayedQueue,
-            &current->waitNode))
+    if (task == scheduler->idleTask ||
+        task->isIdle)
     {
-        /*
-         * If insertion failed, restore runnable state.
-         */
-        current->state =
-            VRT_TASK_RUNNING;
-
-        vrt_list_push_back(
-            &scheduler->readyQueue,
-            &current->node);
-
         return;
     }
 
     /*
-     * Current task is no longer runnable.
+     * Record the wake-up tick.
      */
-    scheduler->currentTask =
-        NULL;
+    task->wakeTick =
+        scheduler->tickCount + ticks;
 
     /*
-     * Select another runnable task.
+     * Mark the task blocked.
      */
+    task->state =
+        VRT_TASK_BLOCKED;
+
+    /*
+     * Remove from the ready queue.
+     */
+    vrt_list_remove(
+        &scheduler->readyQueue,
+        &task->node);
+
+    /*
+     * Add to delayed queue.
+     */
+    vrt_list_push_back(
+        &scheduler->delayedQueue,
+        &task->waitNode);
+
     vrt_scheduler_schedule(
         scheduler);
 
-    vrt_task_t *next =
-        scheduler->currentTask;
+    vrt_freertos_backend_switch_to(
+        scheduler->currentTask);
 
-    if (next == NULL)
-    {
-        /*
-         * Idle should always be available.
-         */
-        for (;;)
-        {
-        }
-    }
-
-    /*
-     * Save current context and switch to next.
-     */
-    vrt_port_switch_context(
-        &current->sp,
-        next->sp);
+    vrt_freertos_backend_block_current();
 }

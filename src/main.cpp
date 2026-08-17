@@ -4,6 +4,7 @@
 #include "vrt_task.h"
 #include "vrt_preempt_timer.h"
 #include "vrt_freertos_backend.h"
+#include "vrt_sync.h"
 #include "vrt_config.h"
 
 static vrt_task_t taskA;
@@ -12,31 +13,24 @@ static vrt_task_t taskB;
 static uint32_t stackA[VRT_STACK_SIZE];
 static uint32_t stackB[VRT_STACK_SIZE];
 
-static volatile uint32_t counterA = 0;
-static volatile uint32_t counterB = 0;
+static vrt_mutex_t testMutex;
+static vrt_sem_t testSemaphore;
+
+static volatile uint32_t aRuns = 0U;
+static volatile uint32_t bRuns = 0U;
 
 static volatile bool
-    taskAStarted = false;
+    mutexPassed = false;
 
 static volatile bool
-    taskBStarted = false;
+    semaphorePassed = false;
 
 static volatile bool
-    stepPassed = false;
+    step18Passed = false;
 
 /*
  * ============================================================================
  * Task A
- * ============================================================================
- *
- * IMPORTANT:
- *
- * No vrt_task_yield().
- *
- * This task deliberately performs CPU work continuously.
- *
- * Preemption must therefore come from the hardware timer -> FreeRTOS ISR
- * scheduling path.
  * ============================================================================
  */
 
@@ -47,56 +41,115 @@ static void task_a(void *argument)
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    taskAStarted = true;
-
     Serial.println();
     Serial.println(
         "========== TASK A STARTED ==========");
 
     for (;;)
     {
-        counterA++;
+        aRuns++;
 
-        if (counterA % 1000000U == 0U)
+        Serial.printf(
+            "A: run=%lu tick=%lu current=%s\n",
+            (unsigned long)aRuns,
+            (unsigned long)scheduler->tickCount,
+            scheduler->currentTask != NULL
+                ? scheduler->currentTask->name
+                : "NULL");
+
+        /*
+         * ------------------------------------------------------------
+         * Mutex test
+         * ------------------------------------------------------------
+         */
+
+        if (!mutexPassed &&
+            aRuns == 2U)
         {
-            Serial.printf(
-                "A: counter=%lu tick=%lu current=%s\n",
-                (unsigned long)counterA,
-                (unsigned long)scheduler->tickCount,
-                scheduler->currentTask != NULL
-                    ? scheduler->currentTask->name
-                    : "NULL");
+            Serial.println();
+            Serial.println(
+                "A: locking mutex...");
+
+            vrt_mutex_lock(
+                &testMutex);
+
+            Serial.println(
+                "A: mutex locked.");
+
+            /*
+             * Hold the mutex long enough for B to try to
+             * acquire it.
+             */
+            for (volatile uint32_t i = 0U;
+                 i < 1200000U;
+                 ++i)
+            {
+            }
+
+            Serial.println(
+                "A: unlocking mutex...");
+
+            vrt_mutex_unlock(
+                &testMutex);
+
+            Serial.println(
+                "A: mutex unlocked.");
         }
 
         /*
-         * Detect that B has actually executed while A
-         * was continuously running.
+         * ------------------------------------------------------------
+         * Semaphore signal
+         * ------------------------------------------------------------
          */
-        if (!stepPassed &&
-            taskBStarted &&
-            counterA >= 1000000U)
+
+        if (aRuns == 5U)
         {
-            stepPassed = true;
+            Serial.println();
+            Serial.println(
+                "A: signaling semaphore...");
+
+            vrt_sem_signal(
+                &testSemaphore);
+        }
+
+        /*
+         * Step 18 complete only after both tests have succeeded.
+         */
+        if (!step18Passed &&
+            mutexPassed &&
+            semaphorePassed)
+        {
+            step18Passed = true;
 
             Serial.println();
             Serial.println(
                 "====================================");
             Serial.println(
-                "STEP 14A PREEMPTION PASSED");
+                "STEP 18 PASSED");
             Serial.println(
                 "====================================");
 
             Serial.println(
-                "Task A was executing without a");
-            Serial.println(
-                "VertexRT voluntary yield.");
+                "Mutex lock/block/unlock worked.");
 
             Serial.println(
-                "Task B was started by the");
-            Serial.println(
-                "FreeRTOS-backed preemption path.");
+                "Semaphore wait/signal worked.");
 
-            Serial.println();
+            Serial.println(
+                "Both synchronization primitives");
+            Serial.println(
+                "are integrated with VertexRT");
+            Serial.println(
+                "blocking and FreeRTOS backing tasks.");
+
+            Serial.println(
+                "====================================");
+        }
+
+        for (volatile uint32_t i = 0U;
+             i < 500000U;
+             ++i)
+        {
         }
     }
 }
@@ -104,9 +157,6 @@ static void task_a(void *argument)
 /*
  * ============================================================================
  * Task B
- * ============================================================================
- *
- * Same deliberate CPU-bound behavior as Task A.
  * ============================================================================
  */
 
@@ -117,25 +167,82 @@ static void task_b(void *argument)
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    taskBStarted = true;
-
     Serial.println();
     Serial.println(
         "========== TASK B STARTED ==========");
 
     for (;;)
     {
-        counterB++;
+        bRuns++;
 
-        if (counterB % 1000000U == 0U)
+        Serial.printf(
+            "B: run=%lu tick=%lu current=%s\n",
+            (unsigned long)bRuns,
+            (unsigned long)scheduler->tickCount,
+            scheduler->currentTask != NULL
+                ? scheduler->currentTask->name
+                : "NULL");
+
+        /*
+         * ------------------------------------------------------------
+         * Mutex test
+         * ------------------------------------------------------------
+         *
+         * B attempts to acquire the mutex while A owns it.
+         * This should block B.
+         */
+
+        if (!mutexPassed &&
+            aRuns >= 2U &&
+            bRuns == 2U)
         {
-            Serial.printf(
-                "B: counter=%lu tick=%lu current=%s\n",
-                (unsigned long)counterB,
-                (unsigned long)scheduler->tickCount,
-                scheduler->currentTask != NULL
-                    ? scheduler->currentTask->name
-                    : "NULL");
+            Serial.println();
+            Serial.println(
+                "B: attempting mutex lock...");
+
+            vrt_mutex_lock(
+                &testMutex);
+
+            Serial.println(
+                "B: acquired mutex.");
+
+            mutexPassed = true;
+
+            vrt_mutex_unlock(
+                &testMutex);
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * Semaphore test
+         * ------------------------------------------------------------
+         *
+         * Initially count == 0, so B should block here.
+         */
+
+        if (!semaphorePassed &&
+            bRuns == 4U)
+        {
+            Serial.println();
+            Serial.println(
+                "B: waiting on semaphore...");
+
+            vrt_sem_wait(
+                &testSemaphore);
+
+            /*
+             * Execution resumes here after A signals.
+             */
+            Serial.println(
+                "B: semaphore received.");
+
+            semaphorePassed = true;
+        }
+
+        for (volatile uint32_t i = 0U;
+             i < 400000U;
+             ++i)
+        {
         }
     }
 }
@@ -156,38 +263,42 @@ void setup()
     Serial.println(
         "====================================");
     Serial.println(
-        "VertexRT STEP 14A");
+        "VertexRT STEP 18");
     Serial.println(
-        "FreeRTOS-backed preemption test");
+        "Mutex / semaphore test");
     Serial.println(
         "====================================");
 
     /*
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
      * Scheduler
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
      */
 
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    Serial.println(
-        "Initializing scheduler...");
-
     vrt_scheduler_init(
         scheduler);
 
-    Serial.println(
-        "Scheduler initialized.");
-
     /*
-     * ------------------------------------------------------------------------
-     * Task A
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
+     * Synchronization primitives
+     * ------------------------------------------------------------
      */
 
-    Serial.println(
-        "Initializing Task A...");
+    vrt_mutex_init(
+        &testMutex);
+
+    vrt_sem_init(
+        &testSemaphore,
+        false);
+
+    /*
+     * ------------------------------------------------------------
+     * Task A
+     * ------------------------------------------------------------
+     */
 
     vrt_task_init(
         &taskA,
@@ -203,13 +314,10 @@ void setup()
         (void *)taskA.sp);
 
     /*
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
      * Task B
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
      */
-
-    Serial.println(
-        "Initializing Task B...");
 
     vrt_task_init(
         &taskB,
@@ -225,13 +333,9 @@ void setup()
         (void *)taskB.sp);
 
     /*
-     * ------------------------------------------------------------------------
-     * Add VertexRT tasks
-     * ------------------------------------------------------------------------
-     *
-     * vrt_scheduler_add_task() now also creates the corresponding
-     * FreeRTOS backing task.
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
+     * Add tasks
+     * ------------------------------------------------------------
      */
 
     if (!vrt_scheduler_add_task(
@@ -267,14 +371,10 @@ void setup()
         "Task B added.");
 
     /*
-     * ------------------------------------------------------------------------
-     * Hardware timer
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
+     * Timer
+     * ------------------------------------------------------------
      */
-
-    Serial.println();
-    Serial.println(
-        "Initializing VertexRT timer ISR...");
 
     if (!vrt_preempt_timer_init())
     {
@@ -286,9 +386,6 @@ void setup()
             delay(1000);
         }
     }
-
-    Serial.println(
-        "Timer ISR initialized.");
 
     if (!vrt_preempt_timer_start())
     {
@@ -305,20 +402,16 @@ void setup()
         "Timer ISR started.");
 
     /*
-     * ------------------------------------------------------------------------
-     * Select first VertexRT task
-     * ------------------------------------------------------------------------
-     *
-     * We do NOT use vrt_scheduler_start(), because that enters the old
-     * raw Xtensa context-switch path.
-     *
-     * Instead, select the first logical task and let the FreeRTOS-backed
-     * task become the actual execution context.
-     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------
+     * Start Task A
+     * ------------------------------------------------------------
      */
 
     taskA.state =
         VRT_TASK_RUNNING;
+
+    taskB.state =
+        VRT_TASK_READY;
 
     scheduler->currentTask =
         &taskA;
@@ -326,40 +419,15 @@ void setup()
     scheduler->running =
         true;
 
-    /*
-     * Notify Task A's FreeRTOS backing task.
-     *
-     * The backing task was already created by
-     * vrt_scheduler_add_task().
-     */
-
-    vrt_freertos_backend_on_preemption(
-        &taskA);
-
     Serial.println();
     Serial.println(
         "Starting FreeRTOS-backed VertexRT...");
 
-    Serial.println(
-        "Task A is the initial logical task.");
-
-    /*
-     * setup() returns.
-     *
-     * Arduino/FreeRTOS continues running the backing tasks.
-     */
+    vrt_freertos_backend_start(
+        &taskA);
 }
-
-/*
- * ============================================================================
- * Arduino loop
- * ============================================================================
- */
 
 void loop()
 {
-    /*
-     * VertexRT execution is handled by the FreeRTOS-backed tasks.
-     */
     delay(1000);
 }

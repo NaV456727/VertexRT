@@ -365,6 +365,9 @@ void vrt_scheduler_schedule(
 
     scheduler->currentTask =
         next;
+
+    vrt_freertos_backend_on_preemption(
+        next);
 }
 
 /*
@@ -438,6 +441,9 @@ void vrt_scheduler_tick(
                 vrt_list_push_back(
                     &scheduler->readyQueue,
                     &task->node);
+
+                vrt_freertos_backend_wake_task(
+                    task);
             }
         }
 
@@ -480,16 +486,66 @@ void vrt_scheduler_tick(
     }
 }
 
-void IRAM_ATTR vrt_scheduler_tick_from_isr(void)
+void IRAM_ATTR
+vrt_scheduler_tick_from_isr(void)
 {
     vrt_scheduler_t *scheduler =
         &vrt_scheduler;
 
     /*
-     * ISR-safe minimal tick path.
+     * Advance kernel time.
      */
     scheduler->tickCount++;
 
+    /*
+     * Wake delayed tasks whose wake time has arrived.
+     */
+    vrt_list_node_t *node =
+        scheduler->delayedQueue.head;
+
+    while (node != NULL)
+    {
+        vrt_list_node_t *nextNode =
+            node->next;
+
+        vrt_task_t *task =
+            (vrt_task_t *)node->owner;
+
+        if (task != NULL &&
+            task->state == VRT_TASK_BLOCKED)
+        {
+            int32_t remaining =
+                (int32_t)(task->wakeTick -
+                          scheduler->tickCount);
+
+            if (remaining <= 0)
+            {
+                vrt_list_remove(
+                    &scheduler->delayedQueue,
+                    &task->waitNode);
+
+                task->state =
+                    VRT_TASK_READY;
+
+                vrt_list_push_back(
+                    &scheduler->readyQueue,
+                    &task->node);
+
+                /*
+                 * Wake the actual FreeRTOS backing task.
+                 */
+                vrt_freertos_backend_wake_task_from_isr(
+                    task);
+            }
+        }
+
+        node = nextNode;
+    }
+
+    /*
+     * Do not do scheduler selection if VertexRT
+     * isn't running yet.
+     */
     if (!scheduler->running)
     {
         return;
@@ -498,13 +554,23 @@ void IRAM_ATTR vrt_scheduler_tick_from_isr(void)
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (current == NULL)
     {
         return;
     }
 
-    vrt_list_node_t *node =
+    /*
+     * Idle never requests preemption.
+     */
+    if (current == scheduler->idleTask)
+    {
+        return;
+    }
+
+    /*
+     * Find another READY task.
+     */
+    node =
         scheduler->readyQueue.head;
 
     while (node != NULL)
@@ -516,7 +582,9 @@ void IRAM_ATTR vrt_scheduler_tick_from_isr(void)
             task != current &&
             task->state == VRT_TASK_READY)
         {
-            scheduler->preemptionPending = true;
+            scheduler->preemptionPending =
+                true;
+
             return;
         }
 
