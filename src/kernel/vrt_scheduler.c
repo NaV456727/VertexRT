@@ -60,6 +60,9 @@ vrt_scheduler_find_ready_task(
         return NULL;
     }
 
+    vrt_task_t *best =
+        NULL;
+
     vrt_list_node_t *node =
         scheduler->readyQueue.head;
 
@@ -71,13 +74,17 @@ vrt_scheduler_find_ready_task(
         if (task != NULL &&
             task->state == VRT_TASK_READY)
         {
-            return task;
+            if (best == NULL ||
+                task->priority > best->priority)
+            {
+                best = task;
+            }
         }
 
         node = node->next;
     }
 
-    return NULL;
+    return best;
 }
 
 /*
@@ -95,46 +102,13 @@ vrt_scheduler_find_next_ready_task(
         return NULL;
     }
 
-    if (scheduler->readyQueue.head == NULL)
-    {
-        return NULL;
-    }
+    vrt_task_t *current =
+        scheduler->currentTask;
 
-    /*
-     * No current task or idle is running.
-     */
-    if (scheduler->currentTask == NULL ||
-        scheduler->currentTask == scheduler->idleTask)
-    {
-        return vrt_scheduler_find_ready_task(
-            scheduler);
-    }
+    vrt_task_t *best =
+        NULL;
 
-    /*
-     * Start immediately after current.
-     */
     vrt_list_node_t *node =
-        scheduler->currentTask->node.next;
-
-    while (node != NULL)
-    {
-        vrt_task_t *task =
-            (vrt_task_t *)node->owner;
-
-        if (task != NULL &&
-            task != scheduler->currentTask &&
-            task->state == VRT_TASK_READY)
-        {
-            return task;
-        }
-
-        node = node->next;
-    }
-
-    /*
-     * Wrap around.
-     */
-    node =
         scheduler->readyQueue.head;
 
     while (node != NULL)
@@ -143,16 +117,20 @@ vrt_scheduler_find_next_ready_task(
             (vrt_task_t *)node->owner;
 
         if (task != NULL &&
-            task != scheduler->currentTask &&
+            task != current &&
             task->state == VRT_TASK_READY)
         {
-            return task;
+            if (best == NULL ||
+                task->priority > best->priority)
+            {
+                best = task;
+            }
         }
 
         node = node->next;
     }
 
-    return NULL;
+    return best;
 }
 
 /*
@@ -365,9 +343,6 @@ void vrt_scheduler_schedule(
 
     scheduler->currentTask =
         next;
-
-    vrt_freertos_backend_on_preemption(
-        next);
 }
 
 /*
@@ -410,6 +385,12 @@ void vrt_scheduler_tick(
 
     /*
      * Wake delayed tasks.
+     *
+     * Becoming READY does NOT directly resume the
+     * FreeRTOS backing task.
+     *
+     * VertexRT first decides whether the woken task
+     * should preempt the current task.
      */
     vrt_list_node_t *node =
         scheduler->delayedQueue.head;
@@ -441,9 +422,6 @@ void vrt_scheduler_tick(
                 vrt_list_push_back(
                     &scheduler->readyQueue,
                     &task->node);
-
-                vrt_freertos_backend_wake_task(
-                    task);
             }
         }
 
@@ -451,39 +429,105 @@ void vrt_scheduler_tick(
     }
 
     /*
-     * Determine whether another runnable task exists.
+     * No current user task.
      */
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (current == NULL)
     {
         return;
     }
 
     /*
-     * Look for another READY task.
+     * Idle can be replaced by any READY user task.
      */
-    vrt_list_node_t *readyNode =
+    if (current == scheduler->idleTask)
+    {
+        vrt_task_t *next =
+            vrt_scheduler_find_ready_task(
+                scheduler);
+
+        if (next == NULL)
+        {
+            return;
+        }
+
+        scheduler->preemptionPending =
+            false;
+
+        scheduler->currentTask =
+            next;
+
+        next->state =
+            VRT_TASK_RUNNING;
+
+        vrt_freertos_backend_switch_to(
+            next);
+
+        return;
+    }
+
+    /*
+     * Find the highest-priority READY task.
+     */
+    vrt_task_t *next =
+        NULL;
+
+    node =
         scheduler->readyQueue.head;
 
-    while (readyNode != NULL)
+    while (node != NULL)
     {
         vrt_task_t *task =
-            (vrt_task_t *)readyNode->owner;
+            (vrt_task_t *)node->owner;
 
         if (task != NULL &&
             task != current &&
             task->state == VRT_TASK_READY)
         {
-            scheduler->preemptionPending = true;
-            return;
+            if (next == NULL ||
+                task->priority > next->priority)
+            {
+                next = task;
+            }
         }
 
-        readyNode =
-            readyNode->next;
+        node =
+            node->next;
     }
+
+    /*
+     * No higher-priority task is ready.
+     */
+    if (next == NULL ||
+        next->priority <= current->priority)
+    {
+        return;
+    }
+
+    /*
+     * A higher-priority task became READY.
+     *
+     * Perform the complete normal-context transition.
+     */
+    current->state =
+        VRT_TASK_READY;
+
+    next->state =
+        VRT_TASK_RUNNING;
+
+    scheduler->currentTask =
+        next;
+
+    scheduler->preemptionPending =
+        false;
+
+    /*
+     * Physical FreeRTOS backing-task switch.
+     */
+    vrt_freertos_backend_switch_to(
+        next);
 }
 
 void IRAM_ATTR
@@ -530,12 +574,6 @@ vrt_scheduler_tick_from_isr(void)
                 vrt_list_push_back(
                     &scheduler->readyQueue,
                     &task->node);
-
-                /*
-                 * Wake the actual FreeRTOS backing task.
-                 */
-                vrt_freertos_backend_wake_task_from_isr(
-                    task);
             }
         }
 
@@ -543,8 +581,8 @@ vrt_scheduler_tick_from_isr(void)
     }
 
     /*
-     * Do not do scheduler selection if VertexRT
-     * isn't running yet.
+     * Do not request preemption until VertexRT
+     * is actually running.
      */
     if (!scheduler->running)
     {
@@ -554,22 +592,19 @@ vrt_scheduler_tick_from_isr(void)
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL)
+    if (current == NULL ||
+        current == scheduler->idleTask)
     {
         return;
     }
 
     /*
-     * Idle never requests preemption.
+     * A timer tick only requests preemption when
+     * another READY task has a HIGHER priority.
      */
-    if (current == scheduler->idleTask)
-    {
-        return;
-    }
+    uint8_t highestPriority =
+        current->priority;
 
-    /*
-     * Find another READY task.
-     */
     node =
         scheduler->readyQueue.head;
 
@@ -582,10 +617,14 @@ vrt_scheduler_tick_from_isr(void)
             task != current &&
             task->state == VRT_TASK_READY)
         {
-            scheduler->preemptionPending =
-                true;
+            if (task->priority >
+                highestPriority)
+            {
+                scheduler->preemptionPending =
+                    true;
 
-            return;
+                return;
+            }
         }
 
         node = node->next;
@@ -647,33 +686,30 @@ vrt_scheduler_select_preemption_from_isr(void)
     }
 
     /*
-     * Search after the current task.
+     * Find the highest-priority READY task.
+     *
+     * Do not use ready-queue order here.
      */
+    vrt_task_t *next =
+        NULL;
+
     vrt_list_node_t *node =
-        current->node.next;
+        scheduler->readyQueue.head;
 
     while (node != NULL)
     {
-        vrt_task_t *next =
+        vrt_task_t *task =
             (vrt_task_t *)node->owner;
 
-        if (next != NULL &&
-            next != current &&
-            next->state == VRT_TASK_READY)
+        if (task != NULL &&
+            task != current &&
+            task->state == VRT_TASK_READY)
         {
-            current->state =
-                VRT_TASK_READY;
-
-            next->state =
-                VRT_TASK_RUNNING;
-
-            scheduler->currentTask =
-                next;
-
-            scheduler->preemptionPending =
-                false;
-
-            return next;
+            if (next == NULL ||
+                task->priority > next->priority)
+            {
+                next = task;
+            }
         }
 
         node =
@@ -681,43 +717,48 @@ vrt_scheduler_select_preemption_from_isr(void)
     }
 
     /*
-     * Wrap around to the beginning.
+     * No higher-priority READY task exists.
      */
-    node =
-        scheduler->readyQueue.head;
-
-    while (node != NULL)
+    if (next == NULL ||
+        next->priority <= current->priority)
     {
-        vrt_task_t *next =
-            (vrt_task_t *)node->owner;
+        scheduler->preemptionPending =
+            false;
 
-        if (next != NULL &&
-            next != current &&
-            next->state == VRT_TASK_READY)
-        {
-            current->state =
-                VRT_TASK_READY;
-
-            next->state =
-                VRT_TASK_RUNNING;
-
-            scheduler->currentTask =
-                next;
-
-            scheduler->preemptionPending =
-                false;
-
-            return next;
-        }
-
-        node =
-            node->next;
+        return NULL;
     }
+
+    /*
+     * Logical VertexRT transition.
+     */
+    current->state =
+        VRT_TASK_READY;
+
+    next->state =
+        VRT_TASK_RUNNING;
+
+    scheduler->currentTask =
+        next;
 
     scheduler->preemptionPending =
         false;
 
-    return NULL;
+    vrt_freertos_backend_on_preemption(
+        current,
+        next);
+
+    /*
+     * IMPORTANT:
+     *
+     * The ISR has selected the next VertexRT task.
+     * Tell the FreeRTOS backend to perform the actual
+     * backing-task switch.
+     */
+    vrt_freertos_backend_on_preemption(
+        current,
+        next);
+
+    return next;
 }
 
 /*

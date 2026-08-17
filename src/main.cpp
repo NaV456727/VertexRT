@@ -4,150 +4,107 @@
 #include "vrt_task.h"
 #include "vrt_preempt_timer.h"
 #include "vrt_freertos_backend.h"
-#include "vrt_sync.h"
-#include "vrt_config.h"
 
-static vrt_task_t taskA;
-static vrt_task_t taskB;
+static vrt_task_t taskLow;
+static vrt_task_t taskMedium;
+static vrt_task_t taskHigh;
 
-static uint32_t stackA[VRT_STACK_SIZE];
-static uint32_t stackB[VRT_STACK_SIZE];
+static uint32_t stackLow[VRT_STACK_SIZE];
+static uint32_t stackMedium[VRT_STACK_SIZE];
+static uint32_t stackHigh[VRT_STACK_SIZE];
 
-static vrt_mutex_t testMutex;
-static vrt_sem_t testSemaphore;
+static volatile uint32_t lowRuns = 0;
+static volatile uint32_t mediumRuns = 0;
+static volatile uint32_t highRuns = 0;
 
-static volatile uint32_t aRuns = 0U;
-static volatile uint32_t bRuns = 0U;
+static volatile bool highBlocked = false;
+static volatile bool mediumBlocked = false;
+static volatile bool highWoke = false;
+static volatile bool passed = false;
 
-static volatile bool
-    mutexPassed = false;
-
-static volatile bool
-    semaphorePassed = false;
-
-static volatile bool
-    step18Passed = false;
-
-/*
- * ============================================================================
- * Task A
- * ============================================================================
- */
-
-static void task_a(void *argument)
+static const char *current_name()
 {
-    (void)argument;
-
-    vrt_scheduler_t *scheduler =
+    vrt_scheduler_t *s =
         vrt_scheduler_get_instance();
 
-    Serial.println();
+    if (s == NULL ||
+        s->currentTask == NULL)
+    {
+        return "NULL";
+    }
+
+    return s->currentTask->name;
+}
+
+/*
+ * LOW = priority 1
+ */
+static void task_low(void *arg)
+{
+    (void)arg;
+
     Serial.println(
-        "========== TASK A STARTED ==========");
+        "========== LOW TASK STARTED ==========");
 
     for (;;)
     {
-        aRuns++;
-
-        Serial.printf(
-            "A: run=%lu tick=%lu current=%s\n",
-            (unsigned long)aRuns,
-            (unsigned long)scheduler->tickCount,
-            scheduler->currentTask != NULL
-                ? scheduler->currentTask->name
-                : "NULL");
-
-        /*
-         * ------------------------------------------------------------
-         * Mutex test
-         * ------------------------------------------------------------
-         */
-
-        if (!mutexPassed &&
-            aRuns == 2U)
+        if (passed)
         {
-            Serial.println();
-            Serial.println(
-                "A: locking mutex...");
-
-            vrt_mutex_lock(
-                &testMutex);
-
-            Serial.println(
-                "A: mutex locked.");
-
             /*
-             * Hold the mutex long enough for B to try to
-             * acquire it.
+             * Do nothing after the acceptance test.
              */
-            for (volatile uint32_t i = 0U;
-                 i < 1200000U;
-                 ++i)
+            for (;;)
             {
+                delay(1000);
             }
-
-            Serial.println(
-                "A: unlocking mutex...");
-
-            vrt_mutex_unlock(
-                &testMutex);
-
-            Serial.println(
-                "A: mutex unlocked.");
         }
 
-        /*
-         * ------------------------------------------------------------
-         * Semaphore signal
-         * ------------------------------------------------------------
-         */
+        lowRuns++;
 
-        if (aRuns == 5U)
-        {
-            Serial.println();
-            Serial.println(
-                "A: signaling semaphore...");
-
-            vrt_sem_signal(
-                &testSemaphore);
-        }
+        Serial.printf(
+            "LOW: run=%lu tick=%lu priority=%u current=%s\n",
+            (unsigned long)lowRuns,
+            (unsigned long)vrt_scheduler_get_instance()->tickCount,
+            (unsigned int)taskLow.priority,
+            current_name());
 
         /*
-         * Step 18 complete only after both tests have succeeded.
+         * Acceptance point:
+         *
+         * HIGH has blocked.
+         * MEDIUM has blocked.
+         * HIGH has subsequently woken.
+         *
+         * Therefore LOW was successfully preempted by HIGH.
          */
-        if (!step18Passed &&
-            mutexPassed &&
-            semaphorePassed)
+        if (!passed &&
+            highBlocked &&
+            mediumBlocked &&
+            highWoke)
         {
-            step18Passed = true;
+            passed = true;
 
             Serial.println();
             Serial.println(
                 "====================================");
             Serial.println(
-                "STEP 18 PASSED");
+                "STEP 19 PASSED");
             Serial.println(
-                "====================================");
-
+                "Priority scheduling is working.");
             Serial.println(
-                "Mutex lock/block/unlock worked.");
-
+                "HIGH (3) > MEDIUM (2) > LOW (1)");
             Serial.println(
-                "Semaphore wait/signal worked.");
-
+                "HIGH blocked -> MEDIUM ran.");
             Serial.println(
-                "Both synchronization primitives");
+                "MEDIUM blocked -> LOW ran.");
             Serial.println(
-                "are integrated with VertexRT");
-            Serial.println(
-                "blocking and FreeRTOS backing tasks.");
-
+                "HIGH woke -> HIGH preempted LOW.");
             Serial.println(
                 "====================================");
         }
 
-        for (volatile uint32_t i = 0U;
-             i < 500000U;
+        for (volatile uint32_t i = 0;
+             i < 500000;
              ++i)
         {
         }
@@ -155,92 +112,56 @@ static void task_a(void *argument)
 }
 
 /*
- * ============================================================================
- * Task B
- * ============================================================================
+ * MEDIUM = priority 2
  */
-
-static void task_b(void *argument)
+static void task_medium(void *arg)
 {
-    (void)argument;
+    (void)arg;
 
-    vrt_scheduler_t *scheduler =
-        vrt_scheduler_get_instance();
-
-    Serial.println();
     Serial.println(
-        "========== TASK B STARTED ==========");
+        "========== MEDIUM TASK STARTED ==========");
 
     for (;;)
     {
-        bRuns++;
+        if (passed)
+        {
+            for (;;)
+            {
+                delay(1000);
+            }
+        }
+
+        mediumRuns++;
 
         Serial.printf(
-            "B: run=%lu tick=%lu current=%s\n",
-            (unsigned long)bRuns,
-            (unsigned long)scheduler->tickCount,
-            scheduler->currentTask != NULL
-                ? scheduler->currentTask->name
-                : "NULL");
+            "MED: run=%lu tick=%lu priority=%u current=%s\n",
+            (unsigned long)mediumRuns,
+            (unsigned long)vrt_scheduler_get_instance()->tickCount,
+            (unsigned int)taskMedium.priority,
+            current_name());
 
         /*
-         * ------------------------------------------------------------
-         * Mutex test
-         * ------------------------------------------------------------
-         *
-         * B attempts to acquire the mutex while A owns it.
-         * This should block B.
+         * HIGH has already blocked.
+         * Let MEDIUM run, then block it so LOW can run.
          */
-
-        if (!mutexPassed &&
-            aRuns >= 2U &&
-            bRuns == 2U)
+        if (!mediumBlocked &&
+            highBlocked &&
+            mediumRuns >= 4)
         {
             Serial.println();
             Serial.println(
-                "B: attempting mutex lock...");
+                "MED: delaying for 20 ticks...");
 
-            vrt_mutex_lock(
-                &testMutex);
+            mediumBlocked = true;
+
+            vrt_task_delay(20);
 
             Serial.println(
-                "B: acquired mutex.");
-
-            mutexPassed = true;
-
-            vrt_mutex_unlock(
-                &testMutex);
+                "MED: woke.");
         }
 
-        /*
-         * ------------------------------------------------------------
-         * Semaphore test
-         * ------------------------------------------------------------
-         *
-         * Initially count == 0, so B should block here.
-         */
-
-        if (!semaphorePassed &&
-            bRuns == 4U)
-        {
-            Serial.println();
-            Serial.println(
-                "B: waiting on semaphore...");
-
-            vrt_sem_wait(
-                &testSemaphore);
-
-            /*
-             * Execution resumes here after A signals.
-             */
-            Serial.println(
-                "B: semaphore received.");
-
-            semaphorePassed = true;
-        }
-
-        for (volatile uint32_t i = 0U;
-             i < 400000U;
+        for (volatile uint32_t i = 0;
+             i < 500000;
              ++i)
         {
         }
@@ -248,183 +169,225 @@ static void task_b(void *argument)
 }
 
 /*
- * ============================================================================
- * Setup
- * ============================================================================
+ * HIGH = priority 3
  */
+static void task_high(void *arg)
+{
+    (void)arg;
+
+    Serial.println(
+        "========== HIGH TASK STARTED ==========");
+
+    for (;;)
+    {
+        if (passed)
+        {
+            for (;;)
+            {
+                delay(1000);
+            }
+        }
+
+        highRuns++;
+
+        Serial.printf(
+            "HIGH: run=%lu tick=%lu priority=%u current=%s\n",
+            (unsigned long)highRuns,
+            (unsigned long)vrt_scheduler_get_instance()->tickCount,
+            (unsigned int)taskHigh.priority,
+            current_name());
+
+        /*
+         * HIGH blocks once.
+         *
+         * Expected:
+         *
+         *     HIGH -> MEDIUM
+         */
+        if (!highBlocked &&
+            highRuns == 3)
+        {
+            Serial.println();
+            Serial.println(
+                "HIGH: delaying for 30 ticks...");
+
+            highBlocked = true;
+
+            vrt_task_delay(30);
+
+            highWoke = true;
+
+            Serial.println(
+                "HIGH: woke.");
+        }
+
+        for (volatile uint32_t i = 0;
+             i < 500000;
+             ++i)
+        {
+        }
+    }
+}
 
 void setup()
 {
     Serial.begin(115200);
-
     delay(1000);
 
     Serial.println();
     Serial.println(
         "====================================");
     Serial.println(
-        "VertexRT STEP 18");
+        "VertexRT STEP 19");
     Serial.println(
-        "Mutex / semaphore test");
+        "Priority scheduling test");
     Serial.println(
         "====================================");
-
-    /*
-     * ------------------------------------------------------------
-     * Scheduler
-     * ------------------------------------------------------------
-     */
 
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
+    Serial.println(
+        "Initializing scheduler...");
+
     vrt_scheduler_init(
         scheduler);
 
-    /*
-     * ------------------------------------------------------------
-     * Synchronization primitives
-     * ------------------------------------------------------------
-     */
+    Serial.println(
+        "Scheduler initialized.");
 
-    vrt_mutex_init(
-        &testMutex);
-
-    vrt_sem_init(
-        &testSemaphore,
-        false);
-
-    /*
-     * ------------------------------------------------------------
-     * Task A
-     * ------------------------------------------------------------
-     */
+    Serial.println(
+        "Initializing LOW task...");
 
     vrt_task_init(
-        &taskA,
-        task_a,
-        nullptr,
+        &taskLow,
+        task_low,
+        NULL,
         1,
-        stackA,
+        stackLow,
         VRT_STACK_SIZE,
-        "taskA");
+        "low");
 
     Serial.printf(
-        "Task A SP = %p\n",
-        (void *)taskA.sp);
+        "LOW SP = %p priority=%u\n",
+        (void *)taskLow.sp,
+        (unsigned int)taskLow.priority);
 
-    /*
-     * ------------------------------------------------------------
-     * Task B
-     * ------------------------------------------------------------
-     */
+    Serial.println(
+        "Initializing MEDIUM task...");
 
     vrt_task_init(
-        &taskB,
-        task_b,
-        nullptr,
-        1,
-        stackB,
+        &taskMedium,
+        task_medium,
+        NULL,
+        2,
+        stackMedium,
         VRT_STACK_SIZE,
-        "taskB");
+        "medium");
 
     Serial.printf(
-        "Task B SP = %p\n",
-        (void *)taskB.sp);
+        "MEDIUM SP = %p priority=%u\n",
+        (void *)taskMedium.sp,
+        (unsigned int)taskMedium.priority);
 
-    /*
-     * ------------------------------------------------------------
-     * Add tasks
-     * ------------------------------------------------------------
-     */
+    Serial.println(
+        "Initializing HIGH task...");
+
+    vrt_task_init(
+        &taskHigh,
+        task_high,
+        NULL,
+        3,
+        stackHigh,
+        VRT_STACK_SIZE,
+        "high");
+
+    Serial.printf(
+        "HIGH SP = %p priority=%u\n",
+        (void *)taskHigh.sp,
+        (unsigned int)taskHigh.priority);
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskA))
+            &taskLow))
     {
         Serial.println(
-            "ERROR: failed to add Task A.");
-
-        while (true)
-        {
-            delay(1000);
-        }
+            "ERROR: failed to add LOW.");
+        return;
     }
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskB))
+            &taskMedium))
     {
         Serial.println(
-            "ERROR: failed to add Task B.");
+            "ERROR: failed to add MEDIUM.");
+        return;
+    }
 
-        while (true)
-        {
-            delay(1000);
-        }
+    if (!vrt_scheduler_add_task(
+            scheduler,
+            &taskHigh))
+    {
+        Serial.println(
+            "ERROR: failed to add HIGH.");
+        return;
     }
 
     Serial.println(
-        "Task A added.");
-
+        "LOW added.");
     Serial.println(
-        "Task B added.");
+        "MEDIUM added.");
+    Serial.println(
+        "HIGH added.");
 
-    /*
-     * ------------------------------------------------------------
-     * Timer
-     * ------------------------------------------------------------
-     */
+    Serial.println();
+    Serial.println(
+        "Initializing VertexRT timer ISR...");
 
     if (!vrt_preempt_timer_init())
     {
         Serial.println(
             "ERROR: timer initialization failed.");
-
-        while (true)
-        {
-            delay(1000);
-        }
+        return;
     }
+
+    Serial.println(
+        "Timer ISR initialized.");
 
     if (!vrt_preempt_timer_start())
     {
         Serial.println(
             "ERROR: timer start failed.");
-
-        while (true)
-        {
-            delay(1000);
-        }
+        return;
     }
 
     Serial.println(
         "Timer ISR started.");
 
-    /*
-     * ------------------------------------------------------------
-     * Start Task A
-     * ------------------------------------------------------------
-     */
-
-    taskA.state =
-        VRT_TASK_RUNNING;
-
-    taskB.state =
-        VRT_TASK_READY;
-
-    scheduler->currentTask =
-        &taskA;
-
-    scheduler->running =
-        true;
-
     Serial.println();
     Serial.println(
         "Starting FreeRTOS-backed VertexRT...");
 
-    vrt_freertos_backend_start(
-        &taskA);
+    Serial.println(
+        "Initial logical task = LOW");
+
+    Serial.println(
+        "Priority order:");
+
+    Serial.println(
+        "HIGH   = 3");
+    Serial.println(
+        "MEDIUM = 2");
+    Serial.println(
+        "LOW    = 1");
+
+    /*
+     * Use the established scheduler start path.
+     * Do not manually modify scheduler->running/currentTask.
+     */
+    vrt_scheduler_start(
+        scheduler);
 }
 
 void loop()

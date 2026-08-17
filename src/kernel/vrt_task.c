@@ -196,7 +196,7 @@ void vrt_task_exit(void)
     }
 
     vrt_task_t *current =
-        vrt_freertos_backend_get_current_task();
+        scheduler->currentTask;
 
     if (current == NULL ||
         current == scheduler->idleTask ||
@@ -454,19 +454,20 @@ void vrt_task_delay(
         return;
     }
 
+    /*
+     * The scheduler's currentTask is the logical task
+     * that called delay().
+     */
     vrt_task_t *task =
-        vrt_freertos_backend_get_current_task();
+        scheduler->currentTask;
 
     if (task == NULL)
     {
         return;
     }
 
-    scheduler->currentTask =
-        task;
-
     /*
-     * Zero-delay is simply a normal yield.
+     * Zero delay is simply a yield.
      */
     if (ticks == 0U)
     {
@@ -475,7 +476,7 @@ void vrt_task_delay(
     }
 
     /*
-     * Do not allow the idle task to block.
+     * Idle task cannot block.
      */
     if (task == scheduler->idleTask ||
         task->isIdle)
@@ -484,36 +485,90 @@ void vrt_task_delay(
     }
 
     /*
-     * Record the wake-up tick.
+     * Calculate wake-up tick.
      */
     task->wakeTick =
         scheduler->tickCount + ticks;
 
     /*
-     * Mark the task blocked.
+     * Mark task blocked.
      */
     task->state =
         VRT_TASK_BLOCKED;
 
     /*
-     * Remove from the ready queue.
+     * Remove task from READY queue.
      */
     vrt_list_remove(
         &scheduler->readyQueue,
         &task->node);
 
     /*
-     * Add to delayed queue.
+     * Add task to delayed queue.
      */
-    vrt_list_push_back(
-        &scheduler->delayedQueue,
-        &task->waitNode);
+    if (!vrt_list_push_back(
+            &scheduler->delayedQueue,
+            &task->waitNode))
+    {
+        /*
+         * Roll back if delayed queue insertion fails.
+         */
+        task->state =
+            VRT_TASK_RUNNING;
 
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &task->node);
+
+        return;
+    }
+
+    /*
+     * The blocked task cannot remain current.
+     *
+     * NULL tells the scheduler to select the best
+     * READY task from the queue.
+     */
+    scheduler->currentTask =
+        NULL;
+
+    /*
+     * Select the highest-priority READY task.
+     */
     vrt_scheduler_schedule(
         scheduler);
 
-    vrt_freertos_backend_switch_to(
-        scheduler->currentTask);
+    vrt_task_t *next =
+        scheduler->currentTask;
 
-    vrt_freertos_backend_block_current();
+    /*
+     * No replacement task available.
+     * Restore the current task.
+     */
+    if (next == NULL ||
+        next == task)
+    {
+        vrt_list_remove(
+            &scheduler->delayedQueue,
+            &task->waitNode);
+
+        task->state =
+            VRT_TASK_RUNNING;
+
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &task->node);
+
+        scheduler->currentTask =
+            task;
+
+        return;
+    }
+
+    /*
+     * Ask the high-priority FreeRTOS dispatcher to perform
+     * the actual backing-task transition.
+     */
+    vrt_freertos_backend_switch_to(
+        next);
 }

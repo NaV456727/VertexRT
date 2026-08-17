@@ -1,6 +1,5 @@
 #include "vrt_preempt_timer.h"
 #include "vrt_scheduler.h"
-#include "vrt_freertos_backend.h"
 
 #include "driver/timer.h"
 #include "esp_intr_alloc.h"
@@ -67,18 +66,7 @@ vrt_preempt_timer_isr(void *arg)
     if (scheduler != NULL &&
         scheduler->preemptionPending)
     {
-        vrt_task_t *next =
-            vrt_scheduler_select_preemption_from_isr();
-
-        /*
-         * Tell the FreeRTOS backing layer which VertexRT
-         * task has become the logical current task.
-         */
-        if (next != NULL)
-        {
-            vrt_freertos_backend_on_preemption(
-                next);
-        }
+        vrt_scheduler_select_preemption_from_isr();
     }
 
     /*
