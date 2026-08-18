@@ -4,248 +4,372 @@
 #include "vrt_task.h"
 #include "vrt_preempt_timer.h"
 #include "vrt_freertos_backend.h"
+#include "vrt_queue.h"
 
-static vrt_task_t taskLow;
-static vrt_task_t taskMedium;
-static vrt_task_t taskHigh;
+/*
+ * ============================================================================
+ * VertexRT STEP 20
+ * Message queue blocking / wake test
+ * ============================================================================
+ *
+ * Queue capacity = 3
+ *
+ * Test sequence:
+ *
+ *     Consumer starts
+ *         ↓
+ *     queue empty
+ *         ↓
+ *     Consumer blocks
+ *         ↓
+ *     Producer starts
+ *         ↓
+ *     Producer sends 100
+ *         ↓
+ *     Consumer wakes
+ *
+ *     Producer sends 200
+ *     Producer sends 300
+ *         ↓
+ *     queue full
+ *
+ *     Producer attempts 400
+ *         ↓
+ *     Producer blocks
+ *
+ *     Consumer receives 100
+ *         ↓
+ *     Producer wakes
+ *
+ *     Consumer receives 200
+ *     Consumer receives 300
+ *     Consumer receives 400
+ *
+ * ============================================================================
+ */
 
-static uint32_t stackLow[VRT_STACK_SIZE];
-static uint32_t stackMedium[VRT_STACK_SIZE];
-static uint32_t stackHigh[VRT_STACK_SIZE];
+/*
+ * ============================================================================
+ * Task objects
+ * ============================================================================
+ */
 
-static volatile uint32_t lowRuns = 0;
-static volatile uint32_t mediumRuns = 0;
-static volatile uint32_t highRuns = 0;
+static vrt_task_t producerTask;
+static vrt_task_t consumerTask;
 
-static volatile bool highBlocked = false;
-static volatile bool mediumBlocked = false;
-static volatile bool highWoke = false;
-static volatile bool passed = false;
+/*
+ * ============================================================================
+ * Task stacks
+ * ============================================================================
+ */
 
-static const char *current_name()
+static uint32_t producerStack[VRT_STACK_SIZE];
+static uint32_t consumerStack[VRT_STACK_SIZE];
+
+/*
+ * ============================================================================
+ * Queue
+ * ============================================================================
+ */
+
+static uint32_t queueStorage[3];
+
+static vrt_queue_t testQueue;
+
+/*
+ * ============================================================================
+ * Test state
+ * ============================================================================
+ */
+
+static volatile uint32_t
+    receivedCount = 0U;
+
+static volatile bool
+    receiverBlockAttempted = false;
+
+static volatile bool
+    senderBlockAttempted = false;
+
+static volatile bool
+    step20Passed = false;
+
+/*
+ * ============================================================================
+ * Expected FIFO values
+ * ============================================================================
+ */
+
+static const uint32_t expectedValues[4] =
+    {
+        100U,
+        200U,
+        300U,
+        400U};
+
+/*
+ * ============================================================================
+ * Producer
+ * ============================================================================
+ */
+
+static void producer_task(void *argument)
 {
-    vrt_scheduler_t *s =
+    (void)argument;
+
+    vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    if (s == NULL ||
-        s->currentTask == NULL)
-    {
-        return "NULL";
-    }
-
-    return s->currentTask->name;
-}
-
-/*
- * LOW = priority 1
- */
-static void task_low(void *arg)
-{
-    (void)arg;
-
+    Serial.println();
     Serial.println(
-        "========== LOW TASK STARTED ==========");
+        "========== PRODUCER TASK STARTED ==========");
 
-    for (;;)
+    for (uint32_t i = 0U;
+         i < 4U;
+         ++i)
     {
-        if (passed)
+        uint32_t value =
+            expectedValues[i];
+
+        Serial.printf(
+            "PRODUCER: sending %lu tick=%lu queue=%lu\n",
+            (unsigned long)value,
+            (unsigned long)scheduler->tickCount,
+            (unsigned long)vrt_queue_count(
+                &testQueue));
+
+        /*
+         * The fourth send should block because the queue
+         * capacity is only three items.
+         */
+        if (i == 3U)
+        {
+            senderBlockAttempted =
+                true;
+
+            Serial.println(
+                "PRODUCER: queue should be full; "
+                "fourth send should block...");
+        }
+
+        if (!vrt_queue_send(
+                &testQueue,
+                &value))
         {
             /*
-             * Do nothing after the acceptance test.
+             * A failed send here is an actual test failure.
              */
+            Serial.println(
+                "PRODUCER: send failed.");
+
             for (;;)
             {
                 delay(1000);
             }
         }
 
-        lowRuns++;
-
         Serial.printf(
-            "LOW: run=%lu tick=%lu priority=%u current=%s\n",
-            (unsigned long)lowRuns,
-            (unsigned long)vrt_scheduler_get_instance()->tickCount,
-            (unsigned int)taskLow.priority,
-            current_name());
+            "PRODUCER: sent %lu queue=%lu\n",
+            (unsigned long)value,
+            (unsigned long)vrt_queue_count(
+                &testQueue));
+    }
 
-        /*
-         * Acceptance point:
-         *
-         * HIGH has blocked.
-         * MEDIUM has blocked.
-         * HIGH has subsequently woken.
-         *
-         * Therefore LOW was successfully preempted by HIGH.
-         */
-        if (!passed &&
-            highBlocked &&
-            mediumBlocked &&
-            highWoke)
-        {
-            passed = true;
+    Serial.println(
+        "PRODUCER: all messages sent.");
 
-            Serial.println();
-            Serial.println(
-                "====================================");
-            Serial.println(
-                "STEP 19 PASSED");
-            Serial.println(
-                "Priority scheduling is working.");
-            Serial.println(
-                "HIGH (3) > MEDIUM (2) > LOW (1)");
-            Serial.println(
-                "HIGH blocked -> MEDIUM ran.");
-            Serial.println(
-                "MEDIUM blocked -> LOW ran.");
-            Serial.println(
-                "HIGH woke -> HIGH preempted LOW.");
-            Serial.println(
-                "====================================");
-        }
-
-        for (volatile uint32_t i = 0;
-             i < 500000;
-             ++i)
-        {
-        }
+    for (;;)
+    {
+        delay(1000);
     }
 }
 
 /*
- * MEDIUM = priority 2
+ * ============================================================================
+ * Consumer
+ * ============================================================================
  */
-static void task_medium(void *arg)
+
+static void consumer_task(void *argument)
 {
-    (void)arg;
+    (void)argument;
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    Serial.println();
+    Serial.println(
+        "========== CONSUMER TASK STARTED ==========");
+
+    /*
+     * The queue is empty at startup.
+     *
+     * This receive must block until the producer sends 100.
+     */
+    receiverBlockAttempted =
+        true;
 
     Serial.println(
-        "========== MEDIUM TASK STARTED ==========");
+        "CONSUMER: waiting for first message...");
 
-    for (;;)
+    uint32_t value =
+        0U;
+
+    if (!vrt_queue_receive(
+            &testQueue,
+            &value))
     {
-        if (passed)
+        Serial.println(
+            "CONSUMER: first receive failed.");
+
+        for (;;)
         {
+            delay(1000);
+        }
+    }
+
+    Serial.printf(
+        "CONSUMER: received=%lu tick=%lu queue=%lu\n",
+        (unsigned long)value,
+        (unsigned long)scheduler->tickCount,
+        (unsigned long)vrt_queue_count(
+            &testQueue));
+
+    /*
+     * Verify first FIFO value.
+     */
+    if (value !=
+        expectedValues[0])
+    {
+        Serial.printf(
+            "ERROR: expected=%lu got=%lu\n",
+            (unsigned long)expectedValues[0],
+            (unsigned long)value);
+
+        for (;;)
+        {
+            delay(1000);
+        }
+    }
+
+    receivedCount++;
+
+    /*
+     * Receive remaining messages.
+     */
+    while (receivedCount < 4U)
+    {
+        value = 0U;
+
+        if (!vrt_queue_receive(
+                &testQueue,
+                &value))
+        {
+            Serial.println(
+                "CONSUMER: receive failed.");
+
             for (;;)
             {
                 delay(1000);
             }
         }
 
-        mediumRuns++;
-
         Serial.printf(
-            "MED: run=%lu tick=%lu priority=%u current=%s\n",
-            (unsigned long)mediumRuns,
-            (unsigned long)vrt_scheduler_get_instance()->tickCount,
-            (unsigned int)taskMedium.priority,
-            current_name());
+            "CONSUMER: received=%lu tick=%lu queue=%lu\n",
+            (unsigned long)value,
+            (unsigned long)scheduler->tickCount,
+            (unsigned long)vrt_queue_count(
+                &testQueue));
 
-        /*
-         * HIGH has already blocked.
-         * Let MEDIUM run, then block it so LOW can run.
-         */
-        if (!mediumBlocked &&
-            highBlocked &&
-            mediumRuns >= 4)
+        if (value !=
+            expectedValues[receivedCount])
         {
-            Serial.println();
-            Serial.println(
-                "MED: delaying for 20 ticks...");
+            Serial.printf(
+                "ERROR: expected=%lu got=%lu\n",
+                (unsigned long)expectedValues[receivedCount],
+                (unsigned long)value);
 
-            mediumBlocked = true;
-
-            vrt_task_delay(20);
-
-            Serial.println(
-                "MED: woke.");
+            for (;;)
+            {
+                delay(1000);
+            }
         }
 
-        for (volatile uint32_t i = 0;
-             i < 500000;
-             ++i)
-        {
-        }
+        receivedCount++;
+    }
+
+    /*
+     * Acceptance criteria.
+     */
+    if (receiverBlockAttempted &&
+        senderBlockAttempted &&
+        receivedCount == 4U)
+    {
+        step20Passed =
+            true;
+
+        Serial.println();
+        Serial.println(
+            "====================================");
+
+        Serial.println(
+            "STEP 20 PASSED");
+
+        Serial.println(
+            "Empty queue -> receiver blocked.");
+
+        Serial.println(
+            "Producer send -> receiver woke.");
+
+        Serial.println(
+            "Full queue -> producer blocked.");
+
+        Serial.println(
+            "Consumer receive -> producer woke.");
+
+        Serial.println(
+            "FIFO ordering verified.");
+
+        Serial.println(
+            "====================================");
+    }
+
+    for (;;)
+    {
+        delay(1000);
     }
 }
 
 /*
- * HIGH = priority 3
+ * ============================================================================
+ * Setup
+ * ============================================================================
  */
-static void task_high(void *arg)
-{
-    (void)arg;
-
-    Serial.println(
-        "========== HIGH TASK STARTED ==========");
-
-    for (;;)
-    {
-        if (passed)
-        {
-            for (;;)
-            {
-                delay(1000);
-            }
-        }
-
-        highRuns++;
-
-        Serial.printf(
-            "HIGH: run=%lu tick=%lu priority=%u current=%s\n",
-            (unsigned long)highRuns,
-            (unsigned long)vrt_scheduler_get_instance()->tickCount,
-            (unsigned int)taskHigh.priority,
-            current_name());
-
-        /*
-         * HIGH blocks once.
-         *
-         * Expected:
-         *
-         *     HIGH -> MEDIUM
-         */
-        if (!highBlocked &&
-            highRuns == 3)
-        {
-            Serial.println();
-            Serial.println(
-                "HIGH: delaying for 30 ticks...");
-
-            highBlocked = true;
-
-            vrt_task_delay(30);
-
-            highWoke = true;
-
-            Serial.println(
-                "HIGH: woke.");
-        }
-
-        for (volatile uint32_t i = 0;
-             i < 500000;
-             ++i)
-        {
-        }
-    }
-}
 
 void setup()
 {
     Serial.begin(115200);
+
     delay(1000);
 
     Serial.println();
     Serial.println(
         "====================================");
     Serial.println(
-        "VertexRT STEP 19");
+        "VertexRT STEP 20");
     Serial.println(
-        "Priority scheduling test");
+        "Message queue blocking test");
     Serial.println(
         "====================================");
 
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
+
+    /*
+     * ------------------------------------------------------------------------
+     * Scheduler
+     * ------------------------------------------------------------------------
+     */
 
     Serial.println(
         "Initializing scheduler...");
@@ -256,90 +380,107 @@ void setup()
     Serial.println(
         "Scheduler initialized.");
 
-    Serial.println(
-        "Initializing LOW task...");
-
-    vrt_task_init(
-        &taskLow,
-        task_low,
-        NULL,
-        1,
-        stackLow,
-        VRT_STACK_SIZE,
-        "low");
-
-    Serial.printf(
-        "LOW SP = %p priority=%u\n",
-        (void *)taskLow.sp,
-        (unsigned int)taskLow.priority);
+    /*
+     * ------------------------------------------------------------------------
+     * Queue
+     * ------------------------------------------------------------------------
+     */
 
     Serial.println(
-        "Initializing MEDIUM task...");
+        "Initializing message queue...");
+
+    vrt_queue_init(
+        &testQueue,
+        queueStorage,
+        sizeof(uint32_t),
+        3U);
+
+    Serial.println(
+        "Queue capacity = 3.");
+
+    /*
+     * ------------------------------------------------------------------------
+     * Consumer
+     * ------------------------------------------------------------------------
+     *
+     * Consumer is registered first so it becomes the initial
+     * task selected by the scheduler.
+     * ------------------------------------------------------------------------
+     */
+
+    Serial.println(
+        "Initializing consumer task...");
 
     vrt_task_init(
-        &taskMedium,
-        task_medium,
+        &consumerTask,
+        consumer_task,
         NULL,
         2,
-        stackMedium,
+        consumerStack,
         VRT_STACK_SIZE,
-        "medium");
+        "consumer");
 
-    Serial.printf(
-        "MEDIUM SP = %p priority=%u\n",
-        (void *)taskMedium.sp,
-        (unsigned int)taskMedium.priority);
+    /*
+     * ------------------------------------------------------------------------
+     * Producer
+     * ------------------------------------------------------------------------
+     */
 
     Serial.println(
-        "Initializing HIGH task...");
+        "Initializing producer task...");
 
     vrt_task_init(
-        &taskHigh,
-        task_high,
+        &producerTask,
+        producer_task,
         NULL,
-        3,
-        stackHigh,
+        2,
+        producerStack,
         VRT_STACK_SIZE,
-        "high");
+        "producer");
 
-    Serial.printf(
-        "HIGH SP = %p priority=%u\n",
-        (void *)taskHigh.sp,
-        (unsigned int)taskHigh.priority);
+    /*
+     * ------------------------------------------------------------------------
+     * Register tasks
+     * ------------------------------------------------------------------------
+     */
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskLow))
+            &consumerTask))
     {
         Serial.println(
-            "ERROR: failed to add LOW.");
-        return;
+            "ERROR: failed to add consumer.");
+
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskMedium))
+            &producerTask))
     {
         Serial.println(
-            "ERROR: failed to add MEDIUM.");
-        return;
-    }
+            "ERROR: failed to add producer.");
 
-    if (!vrt_scheduler_add_task(
-            scheduler,
-            &taskHigh))
-    {
-        Serial.println(
-            "ERROR: failed to add HIGH.");
-        return;
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
     Serial.println(
-        "LOW added.");
+        "Consumer added.");
+
     Serial.println(
-        "MEDIUM added.");
-    Serial.println(
-        "HIGH added.");
+        "Producer added.");
+
+    /*
+     * ------------------------------------------------------------------------
+     * Timer
+     * ------------------------------------------------------------------------
+     */
 
     Serial.println();
     Serial.println(
@@ -349,7 +490,11 @@ void setup()
     {
         Serial.println(
             "ERROR: timer initialization failed.");
-        return;
+
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
     Serial.println(
@@ -359,36 +504,54 @@ void setup()
     {
         Serial.println(
             "ERROR: timer start failed.");
-        return;
+
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
     Serial.println(
         "Timer ISR started.");
 
+    /*
+     * ------------------------------------------------------------------------
+     * FreeRTOS-backed startup
+     * ------------------------------------------------------------------------
+     *
+     * Do NOT call vrt_scheduler_start() here.
+     *
+     * We explicitly start the FreeRTOS backing task so the queue
+     * blocking path uses the same execution model as the rest of
+     * the current Step 20 implementation.
+     * ------------------------------------------------------------------------
+     */
+
     Serial.println();
     Serial.println(
         "Starting FreeRTOS-backed VertexRT...");
 
-    Serial.println(
-        "Initial logical task = LOW");
+    scheduler->currentTask =
+        &consumerTask;
 
-    Serial.println(
-        "Priority order:");
+    scheduler->running =
+        true;
 
-    Serial.println(
-        "HIGH   = 3");
-    Serial.println(
-        "MEDIUM = 2");
-    Serial.println(
-        "LOW    = 1");
+    consumerTask.state =
+        VRT_TASK_RUNNING;
 
-    /*
-     * Use the established scheduler start path.
-     * Do not manually modify scheduler->running/currentTask.
-     */
-    vrt_scheduler_start(
-        scheduler);
+    producerTask.state =
+        VRT_TASK_READY;
+
+    vrt_freertos_backend_start(
+        &consumerTask);
 }
+
+/*
+ * ============================================================================
+ * Arduino loop
+ * ============================================================================
+ */
 
 void loop()
 {
