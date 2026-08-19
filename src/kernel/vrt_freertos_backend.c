@@ -136,6 +136,12 @@ vrt_freertos_dispatcher(
             pdTRUE,
             portMAX_DELAY);
 
+        /*
+         * ---------------------------------------------------------------
+         * Normal preemption request
+         * ---------------------------------------------------------------
+         */
+
         vrt_task_t *next =
             (vrt_task_t *)pending_next_task;
 
@@ -156,13 +162,7 @@ vrt_freertos_dispatcher(
         }
 
         /*
-         * Enforce the VertexRT invariant:
-         *
-         *     selected task      -> RUNNABLE
-         *     every other task   -> SUSPENDED
-         *
-         * This prevents FreeRTOS round-robin execution between
-         * VertexRT backing tasks.
+         * Suspend every other VertexRT backing task.
          */
         for (uint32_t i = 0U;
              i < binding_count;
@@ -182,10 +182,6 @@ vrt_freertos_dispatcher(
                 handle);
         }
 
-        /*
-         * The selected VertexRT task is the only backing task
-         * that should remain runnable.
-         */
         active_freertos_task =
             nextBinding->handle;
 
@@ -608,51 +604,55 @@ void vrt_freertos_backend_switch_to(
 void vrt_freertos_backend_exit_current(
     vrt_task_t *next)
 {
-    if (next == NULL)
+    if (!backend_initialized ||
+        next == NULL)
     {
-        /*
-         * No replacement task.
-         *
-         * This case will be handled by the idle-task
-         * implementation in the final cleanup pass.
-         */
-        vTaskDelete(NULL);
-
-        for (;;)
-        {
-        }
+        return;
     }
 
-    vrt_freertos_binding_t *binding =
+    vrt_freertos_binding_t *nextBinding =
         find_binding(next);
 
-    if (binding == NULL)
+    if (nextBinding == NULL)
     {
-        vTaskDelete(NULL);
-
-        for (;;)
-        {
-        }
+        return;
     }
 
+    /*
+     * The current VertexRT task has already been marked
+     * TERMINATED by vrt_task_exit().
+     *
+     * Select the replacement task first.
+     */
     active_freertos_task =
-        binding->handle;
+        nextBinding->handle;
 
     next->state =
         VRT_TASK_RUNNING;
 
-    vTaskResume(
-        binding->handle);
-
     /*
-     * Delete the currently executing FreeRTOS backing task.
-     *
-     * This call does not return to the terminated task.
+     * Make the replacement backing task runnable.
      */
-    vTaskDelete(NULL);
+    vTaskResume(
+        nextBinding->handle);
 
     /*
-     * Defensive fallback.
+     * Suspend the CURRENT backing FreeRTOS task.
+     *
+     * Do not delete it here.
+     *
+     * The current task is the one executing this function.
+     * Suspending it safely transfers execution to the
+     * replacement task without destroying its TCB/stack
+     * while the transition is still in progress.
+     */
+    vTaskSuspend(NULL);
+
+    /*
+     * We should never execute here again until some code
+     * explicitly resumes this terminated backing task.
+     *
+     * It must remain suspended permanently for now.
      */
     for (;;)
     {
