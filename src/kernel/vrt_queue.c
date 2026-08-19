@@ -248,16 +248,12 @@ vrt_queue_wake_one(
     }
 
     /*
-     * IMPORTANT:
+     * The task is now READY from VertexRT's perspective.
      *
-     * The VertexRT task is READY, but its FreeRTOS backing
-     * task may still be suspended because it was previously
-     * blocked on this queue.
-     *
-     * Make the backing task runnable again.
+     * Do not directly resume its FreeRTOS backing task.
+     * VertexRT must first decide whether this task should
+     * actually run.
      */
-    vrt_freertos_backend_resume_task(
-        task);
 
     /*
      * If the woken task has higher priority than the

@@ -1,10 +1,13 @@
 #include "vrt_list.h"
 
-/*=========================================================
+/*
+ * ============================================================================
  * Initialization
- *=========================================================*/
+ * ============================================================================
+ */
 
-void vrt_list_init(vrt_list_t *list)
+void vrt_list_init(
+    vrt_list_t *list)
 {
     if (list == NULL)
     {
@@ -13,32 +16,36 @@ void vrt_list_init(vrt_list_t *list)
 
     list->head = NULL;
     list->tail = NULL;
-    list->size = 0;
+    list->size = 0U;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Push Back
- *=========================================================*/
+ * ============================================================================
+ */
 
 bool vrt_list_push_back(
     vrt_list_t *list,
     vrt_list_node_t *node)
 {
-    if (list == NULL || node == NULL)
+    if (list == NULL ||
+        node == NULL)
     {
         return false;
     }
 
     /*
-     * A node must not already belong to another list.
+     * A node already belonging to a list cannot be inserted again.
      */
-    if (node->next != NULL || node->prev != NULL)
+    if (node->list != NULL)
     {
         return false;
     }
 
     node->next = NULL;
     node->prev = list->tail;
+    node->list = list;
 
     /*
      * Empty list.
@@ -58,29 +65,33 @@ bool vrt_list_push_back(
     return true;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Push Front
- *=========================================================*/
+ * ============================================================================
+ */
 
 bool vrt_list_push_front(
     vrt_list_t *list,
     vrt_list_node_t *node)
 {
-    if (list == NULL || node == NULL)
+    if (list == NULL ||
+        node == NULL)
     {
         return false;
     }
 
     /*
-     * A node must not already belong to another list.
+     * A node already belonging to a list cannot be inserted again.
      */
-    if (node->next != NULL || node->prev != NULL)
+    if (node->list != NULL)
     {
         return false;
     }
 
     node->prev = NULL;
     node->next = list->head;
+    node->list = list;
 
     /*
      * Empty list.
@@ -100,23 +111,26 @@ bool vrt_list_push_front(
     return true;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Remove
- *=========================================================*/
+ * ============================================================================
+ */
 
 bool vrt_list_remove(
     vrt_list_t *list,
     vrt_list_node_t *node)
 {
-    if (list == NULL || node == NULL)
+    if (list == NULL ||
+        node == NULL)
     {
         return false;
     }
 
     /*
-     * Empty list.
+     * The node must belong to this exact list.
      */
-    if (list->head == NULL)
+    if (node->list != list)
     {
         return false;
     }
@@ -156,12 +170,9 @@ bool vrt_list_remove(
      */
     node->next = NULL;
     node->prev = NULL;
+    node->list = NULL;
 
-    /*
-     * Prevent underflow if the list was already
-     * internally inconsistent.
-     */
-    if (list->size > 0)
+    if (list->size > 0U)
     {
         list->size--;
     }
@@ -169,87 +180,75 @@ bool vrt_list_remove(
     return true;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Pop Front
- *=========================================================*/
+ * ============================================================================
+ */
 
-vrt_list_node_t *vrt_list_pop_front(
+vrt_list_node_t *
+vrt_list_pop_front(
     vrt_list_t *list)
 {
-    if (list == NULL || list->head == NULL)
+    if (list == NULL ||
+        list->head == NULL)
     {
         return NULL;
     }
 
-    vrt_list_node_t *node = list->head;
+    vrt_list_node_t *node =
+        list->head;
 
-    if (node->next != NULL)
+    /*
+     * Remove using the normal membership-aware path.
+     */
+    if (!vrt_list_remove(
+            list,
+            node))
     {
-        list->head = node->next;
-        list->head->prev = NULL;
-    }
-    else
-    {
-        /*
-         * List becomes empty.
-         */
-        list->head = NULL;
-        list->tail = NULL;
-    }
-
-    node->next = NULL;
-    node->prev = NULL;
-
-    if (list->size > 0)
-    {
-        list->size--;
+        return NULL;
     }
 
     return node;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Pop Back
- *=========================================================*/
+ * ============================================================================
+ */
 
-vrt_list_node_t *vrt_list_pop_back(
+vrt_list_node_t *
+vrt_list_pop_back(
     vrt_list_t *list)
 {
-    if (list == NULL || list->tail == NULL)
+    if (list == NULL ||
+        list->tail == NULL)
     {
         return NULL;
     }
 
-    vrt_list_node_t *node = list->tail;
+    vrt_list_node_t *node =
+        list->tail;
 
-    if (node->prev != NULL)
+    /*
+     * Remove using the normal membership-aware path.
+     */
+    if (!vrt_list_remove(
+            list,
+            node))
     {
-        list->tail = node->prev;
-        list->tail->next = NULL;
-    }
-    else
-    {
-        /*
-         * List becomes empty.
-         */
-        list->head = NULL;
-        list->tail = NULL;
-    }
-
-    node->next = NULL;
-    node->prev = NULL;
-
-    if (list->size > 0)
-    {
-        list->size--;
+        return NULL;
     }
 
     return node;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Is Empty
- *=========================================================*/
+ * ============================================================================
+ */
 
 bool vrt_list_is_empty(
     const vrt_list_t *list)
@@ -259,27 +258,31 @@ bool vrt_list_is_empty(
         return true;
     }
 
-    return (list->size == 0);
+    return list->size == 0U;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Size
- *=========================================================*/
+ * ============================================================================
+ */
 
 uint32_t vrt_list_size(
     const vrt_list_t *list)
 {
     if (list == NULL)
     {
-        return 0;
+        return 0U;
     }
 
     return list->size;
 }
 
-/*=========================================================
+/*
+ * ============================================================================
  * Insert Before
- *=========================================================*/
+ * ============================================================================
+ */
 
 bool vrt_list_insert_before(
     vrt_list_t *list,
@@ -294,32 +297,17 @@ bool vrt_list_insert_before(
     }
 
     /*
-     * A node must not already belong to another list.
+     * New node must be detached.
      */
-    if (node->next != NULL || node->prev != NULL)
+    if (node->list != NULL)
     {
         return false;
     }
 
     /*
-     * Position must belong to this list.
-     *
-     * Search the list instead of relying solely on
-     * prev/next pointers.
+     * Position must belong to this exact list.
      */
-    vrt_list_node_t *current = list->head;
-
-    while (current != NULL)
-    {
-        if (current == position)
-        {
-            break;
-        }
-
-        current = current->next;
-    }
-
-    if (current != position)
+    if (position->list != list)
     {
         return false;
     }
@@ -329,6 +317,7 @@ bool vrt_list_insert_before(
      */
     node->next = position;
     node->prev = position->prev;
+    node->list = list;
 
     if (position->prev != NULL)
     {

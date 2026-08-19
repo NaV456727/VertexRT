@@ -198,7 +198,28 @@ void vrt_scheduler_init(
     scheduler->currentTask =
         scheduler->idleTask;
 
-    vrt_freertos_backend_init();
+    if (!vrt_freertos_backend_init())
+    {
+        scheduler->idleTask =
+            NULL;
+
+        scheduler->currentTask =
+            NULL;
+
+        return;
+    }
+
+    if (!vrt_freertos_backend_register_idle(
+            scheduler->idleTask))
+    {
+        scheduler->idleTask =
+            NULL;
+
+        scheduler->currentTask =
+            NULL;
+
+        return;
+    }
 }
 
 /*
@@ -592,9 +613,38 @@ vrt_scheduler_tick_from_isr(void)
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (current == NULL)
     {
+        return;
+    }
+
+    /*
+     * If VertexRT idle is currently running, any READY
+     * user task can replace it.
+     */
+    if (current == scheduler->idleTask)
+    {
+        vrt_list_node_t *idleNode =
+            scheduler->readyQueue.head;
+
+        while (idleNode != NULL)
+        {
+            vrt_task_t *task =
+                (vrt_task_t *)idleNode->owner;
+
+            if (task != NULL &&
+                task->state == VRT_TASK_READY)
+            {
+                scheduler->preemptionPending =
+                    true;
+
+                return;
+            }
+
+            idleNode =
+                idleNode->next;
+        }
+
         return;
     }
 
@@ -679,8 +729,7 @@ vrt_scheduler_select_preemption_from_isr(void)
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (current == NULL)
     {
         return NULL;
     }
@@ -743,17 +792,6 @@ vrt_scheduler_select_preemption_from_isr(void)
     scheduler->preemptionPending =
         false;
 
-    vrt_freertos_backend_on_preemption(
-        current,
-        next);
-
-    /*
-     * IMPORTANT:
-     *
-     * The ISR has selected the next VertexRT task.
-     * Tell the FreeRTOS backend to perform the actual
-     * backing-task switch.
-     */
     vrt_freertos_backend_on_preemption(
         current,
         next);

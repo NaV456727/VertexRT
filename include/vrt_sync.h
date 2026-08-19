@@ -65,6 +65,35 @@ extern "C"
     void vrt_mutex_unlock(
         vrt_mutex_t *mutex);
 
+    /*=========================================================
+     * Event Group
+     *=========================================================*/
+
+    typedef struct
+    {
+        uint32_t bits;
+
+        vrt_list_t waitQueue;
+
+    } vrt_event_group_t;
+
+    /*=========================================================
+     * Event Group API
+     *=========================================================*/
+
+    void vrt_event_group_init(
+        vrt_event_group_t *group);
+
+    uint32_t vrt_event_group_wait_bits(
+        vrt_event_group_t *group,
+        uint32_t bits,
+        bool waitForAll,
+        bool clearOnExit);
+
+    void vrt_event_group_set_bits(
+        vrt_event_group_t *group,
+        uint32_t bits);
+
 #ifdef __cplusplus
 }
 #endif

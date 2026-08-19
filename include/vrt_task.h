@@ -19,14 +19,6 @@ extern "C"
 
     /*
      * Task states.
-     *
-     * Keep the existing numeric values:
-     *
-     *     READY      = 0
-     *     RUNNING    = 1
-     *     BLOCKED    = 2
-     *     SUSPENDED  = 3
-     *     TERMINATED = 4
      */
     typedef enum
     {
@@ -86,6 +78,24 @@ extern "C"
         uint32_t wakeTick;
 
         /*
+         * ================================================================
+         * Event group wait state
+         * ================================================================
+         *
+         * These fields are only meaningful while the task is waiting
+         * on an event group.
+         */
+
+        /*
+         * Event group wait state.
+         */
+        uint32_t eventWaitBits;
+        uint32_t eventWaitResult;
+
+        bool eventWaitForAll;
+        bool eventClearOnExit;
+
+        /*
          * Task name.
          */
         char name[VRT_TASK_NAME_LENGTH];
@@ -138,9 +148,8 @@ extern "C"
      * ========================================================================
      * Delay / blocking
      * ========================================================================
-     *
-     * Block the current task for the specified number of scheduler ticks.
      */
+
     void vrt_task_delay(
         uint32_t ticks);
 

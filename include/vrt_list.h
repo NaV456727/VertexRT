@@ -8,6 +8,8 @@ extern "C"
 {
 #endif
 
+    struct vrt_list;
+
     typedef struct vrt_list_node
     {
         /* Adjacent nodes */
@@ -16,6 +18,13 @@ extern "C"
 
         /* Object that owns this node */
         void *owner;
+
+        /*
+         * List that currently owns this node.
+         *
+         * NULL means the node is detached.
+         */
+        struct vrt_list *list;
 
     } vrt_list_node_t;
 
@@ -33,30 +42,40 @@ extern "C"
     } vrt_list_t;
 
     /* Initialize */
-    void vrt_list_init(vrt_list_t *list);
+    void vrt_list_init(
+        vrt_list_t *list);
 
     /* Insertion */
-    bool vrt_list_push_back(vrt_list_t *list, vrt_list_node_t *node);
-    bool vrt_list_push_front(vrt_list_t *list, vrt_list_node_t *node);
+    bool vrt_list_push_back(
+        vrt_list_t *list,
+        vrt_list_node_t *node);
+
+    bool vrt_list_push_front(
+        vrt_list_t *list,
+        vrt_list_node_t *node);
 
     /* Removal */
-    bool vrt_list_remove(vrt_list_t *list, vrt_list_node_t *node);
-    vrt_list_node_t *vrt_list_pop_front(vrt_list_t *list);
-    vrt_list_node_t *vrt_list_pop_back(vrt_list_t *list);
+    bool vrt_list_remove(
+        vrt_list_t *list,
+        vrt_list_node_t *node);
+
+    vrt_list_node_t *
+    vrt_list_pop_front(
+        vrt_list_t *list);
+
+    vrt_list_node_t *
+    vrt_list_pop_back(
+        vrt_list_t *list);
 
     /* Utilities */
-    bool vrt_list_is_empty(const vrt_list_t *list);
-    uint32_t vrt_list_size(const vrt_list_t *list);
+    bool vrt_list_is_empty(
+        const vrt_list_t *list);
+
+    uint32_t vrt_list_size(
+        const vrt_list_t *list);
 
     /**
      * @brief Insert a node before another node.
-     *
-     * @param list Pointer to the list.
-     * @param position Node to insert before.
-     * @param node Node to insert.
-     *
-     * @return true on success.
-     * @return false on failure.
      */
     bool vrt_list_insert_before(
         vrt_list_t *list,
@@ -67,4 +86,4 @@ extern "C"
 }
 #endif
 
-#endif
+#endif /* VRT_LIST_H */

@@ -48,6 +48,7 @@ void vrt_task_init(
     task->waitNode.owner = task;
     task->waitNode.next = NULL;
     task->waitNode.prev = NULL;
+    task->waitNode.list = NULL;
 
     /*
      * Ready queue node.
@@ -55,6 +56,7 @@ void vrt_task_init(
     task->node.owner = task;
     task->node.next = NULL;
     task->node.prev = NULL;
+    task->node.list = NULL;
 
     /*
      * Basic metadata.
@@ -122,6 +124,11 @@ void vrt_task_init(
 
     task->name[VRT_TASK_NAME_LENGTH - 1U] =
         '\0';
+
+    task->eventWaitBits = 0U;
+    task->eventWaitResult = 0U;
+    task->eventWaitForAll = false;
+    task->eventClearOnExit = false;
 }
 
 /*
@@ -174,9 +181,8 @@ void vrt_task_yield(void)
         return;
     }
 
-    vrt_port_switch_context(
-        &current->sp,
-        next->sp);
+    vrt_freertos_backend_switch_to(
+        next);
 }
 
 /*

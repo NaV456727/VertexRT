@@ -22,7 +22,7 @@ typedef struct
 } vrt_freertos_binding_t;
 
 static vrt_freertos_binding_t
-    bindings[VRT_MAX_TASKS];
+    bindings[VRT_MAX_TASKS + 1U];
 
 static uint32_t
     binding_count = 0U;
@@ -84,6 +84,34 @@ find_binding(
         if (bindings[i].vrtTask == task)
         {
             return &bindings[i];
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * ============================================================================
+ * Find VertexRT task from the currently executing FreeRTOS task
+ * ============================================================================
+ */
+
+static vrt_task_t *
+find_task_from_handle(
+    TaskHandle_t handle)
+{
+    if (handle == NULL)
+    {
+        return NULL;
+    }
+
+    for (uint32_t i = 0U;
+         i < binding_count;
+         ++i)
+    {
+        if (bindings[i].handle == handle)
+        {
+            return bindings[i].vrtTask;
         }
     }
 
@@ -319,22 +347,62 @@ bool vrt_freertos_backend_register_task(
     vTaskSuspend(
         handle);
 
+    bindings[binding_count].vrtTask =
+        task;
+
+    bindings[binding_count].handle =
+        handle;
+
+    binding_count++;
+
+    return true;
+}
+
+bool vrt_freertos_backend_register_idle(
+    vrt_task_t *task)
+{
+    if (!backend_initialized ||
+        task == NULL)
+    {
+        return false;
+    }
+
+    if (find_binding(task) != NULL)
+    {
+        return true;
+    }
+
+    if (binding_count >=
+        (VRT_MAX_TASKS + 1U))
+    {
+        return false;
+    }
+
+    TaskHandle_t handle =
+        NULL;
+
+    BaseType_t result =
+        xTaskCreate(
+            vrt_freertos_task_entry,
+            "vrt_idle",
+            2048,
+            task,
+            0,
+            &handle);
+
+    if (result != pdPASS)
+    {
+        return false;
+    }
+
     /*
-     * Mirror VertexRT priority into FreeRTOS priority.
+     * Idle backing task starts suspended.
      *
-     * VertexRT:
-     *     LOW    = 1
-     *     MEDIUM = 2
-     *     HIGH   = 3
-     *
-     * FreeRTOS:
-     *     LOW    = 2
-     *     MEDIUM = 3
-     *     HIGH   = 4
+     * VertexRT will explicitly select it when there
+     * are no runnable user tasks.
      */
-    vTaskPrioritySet(
-        handle,
-        (UBaseType_t)(task->priority + 1U));
+    vTaskSuspend(
+        handle);
 
     bindings[binding_count].vrtTask =
         task;
@@ -449,10 +517,13 @@ void vrt_freertos_backend_wake_task(
     vrt_task_t *task)
 {
     /*
-     * Becoming READY does not mean this task should
-     * immediately execute.
+     * Waking a VertexRT task only makes it READY
+     * from the VertexRT scheduler's point of view.
      *
-     * VertexRT must first select it according to priority.
+     * Do not resume the FreeRTOS backing task here.
+     *
+     * VertexRT must first decide whether this task
+     * should actually run.
      */
     (void)task;
 }
@@ -492,7 +563,7 @@ void vrt_freertos_backend_switch_to(
         active_freertos_task;
 
     /*
-     * Already running the selected task.
+     * Nothing to switch.
      */
     if (previousHandle ==
         nextBinding->handle)
@@ -501,13 +572,14 @@ void vrt_freertos_backend_switch_to(
     }
 
     /*
-     * Make the selected backing task runnable first.
+     * The selected task must be runnable.
      */
     vTaskResume(
         nextBinding->handle);
 
     /*
-     * Update backend ownership.
+     * Update VertexRT/FreeRTOS ownership BEFORE
+     * suspending the previous task.
      */
     active_freertos_task =
         nextBinding->handle;
@@ -516,26 +588,19 @@ void vrt_freertos_backend_switch_to(
         VRT_TASK_RUNNING;
 
     /*
-     * Suspend the VertexRT backing task that was
-     * actually active before this transition.
-     *
-     * Do NOT use xTaskGetCurrentTaskHandle() here.
-     * The function may be called from scheduler/tick
-     * context rather than from the backing task itself.
+     * Suspend the backing task that VertexRT believed
+     * was currently executing.
      */
     if (previousHandle != NULL &&
-        previousHandle !=
-            dispatcher_handle &&
-        previousHandle !=
-            nextBinding->handle)
+        previousHandle != dispatcher_handle &&
+        previousHandle != nextBinding->handle)
     {
         vTaskSuspend(
             previousHandle);
     }
 
     /*
-     * Let FreeRTOS immediately schedule the newly
-     * selected backing task.
+     * Let FreeRTOS perform the runnable-task selection.
      */
     taskYIELD();
 }
@@ -597,15 +662,20 @@ void vrt_freertos_backend_exit_current(
 vrt_task_t *
 vrt_freertos_backend_get_current_task(void)
 {
-    vrt_scheduler_t *scheduler =
-        vrt_scheduler_get_instance();
+    TaskHandle_t handle =
+        xTaskGetCurrentTaskHandle();
 
-    if (scheduler == NULL)
+    if (handle == NULL)
     {
         return NULL;
     }
 
-    return scheduler->currentTask;
+    /*
+     * Map the actual FreeRTOS task currently executing
+     * back to its VertexRT task control block.
+     */
+    return find_task_from_handle(
+        handle);
 }
 
 void vrt_freertos_backend_suspend_task(

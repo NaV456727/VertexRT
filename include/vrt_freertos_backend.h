@@ -45,6 +45,9 @@ extern "C"
     void vrt_freertos_backend_resume_task(
         vrt_task_t *task);
 
+    bool vrt_freertos_backend_register_idle(
+        vrt_task_t *task);
+
 #ifdef __cplusplus
 }
 #endif
