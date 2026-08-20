@@ -99,20 +99,23 @@ vrt_queue_block_current(
     }
 
     /*
-     * Remove from the READY queue.
+     * Remove current task from READY queue.
      */
-    vrt_list_remove(
-        &scheduler->readyQueue,
-        &current->node);
+    if (!vrt_list_remove(
+            &scheduler->readyQueue,
+            &current->node))
+    {
+        return false;
+    }
 
     /*
-     * Mark blocked.
+     * Block it.
      */
     current->state =
         VRT_TASK_BLOCKED;
 
     /*
-     * Put task on the queue's wait list.
+     * Put it on the queue wait list.
      */
     if (!vrt_list_push_back(
             waitQueue,
@@ -135,19 +138,23 @@ vrt_queue_block_current(
         NULL;
 
     /*
-     * Find another runnable task.
+     * Let the normal scheduler choose the next task.
+     *
+     * With currentTask == NULL, scheduler_schedule()
+     * searches the READY queue for the highest-priority
+     * task.
      */
+    vrt_scheduler_schedule(
+        scheduler);
+
     vrt_task_t *next =
-        vrt_queue_find_highest_ready(
-            scheduler);
+        scheduler->currentTask;
 
     /*
-     * No replacement task exists.
-     *
-     * Roll back instead of leaving the system without
-     * a runnable backing task.
+     * No replacement means we cannot safely block.
      */
-    if (next == NULL)
+    if (next == NULL ||
+        next == current)
     {
         vrt_list_remove(
             waitQueue,
@@ -166,16 +173,16 @@ vrt_queue_block_current(
         return false;
     }
 
-    next->state =
-        VRT_TASK_RUNNING;
-
-    scheduler->currentTask =
-        next;
-
     /*
-     * Perform the actual FreeRTOS-backed switch.
+     * The scheduler has selected a replacement.
      *
-     * This suspends the backing task that called us.
+     * The backend performs:
+     *
+     *     resume(next)
+     *     suspend(current)
+     *     yield()
+     *
+     * When current is eventually woken, this call returns.
      */
     vrt_freertos_backend_switch_to(
         next);

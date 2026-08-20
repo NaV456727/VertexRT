@@ -310,7 +310,7 @@ bool vrt_freertos_backend_register_task(
     }
 
     if (binding_count >=
-        VRT_MAX_TASKS)
+        (VRT_MAX_TASKS + 1U))
     {
         return false;
     }
@@ -558,9 +558,6 @@ void vrt_freertos_backend_switch_to(
     TaskHandle_t previousHandle =
         active_freertos_task;
 
-    /*
-     * Nothing to switch.
-     */
     if (previousHandle ==
         nextBinding->handle)
     {
@@ -568,14 +565,14 @@ void vrt_freertos_backend_switch_to(
     }
 
     /*
-     * The selected task must be runnable.
+     * Make next runnable first.
      */
     vTaskResume(
         nextBinding->handle);
 
     /*
-     * Update VertexRT/FreeRTOS ownership BEFORE
-     * suspending the previous task.
+     * Update backend ownership before removing
+     * the previous task.
      */
     active_freertos_task =
         nextBinding->handle;
@@ -584,21 +581,48 @@ void vrt_freertos_backend_switch_to(
         VRT_TASK_RUNNING;
 
     /*
-     * Suspend the backing task that VertexRT believed
-     * was currently executing.
+     * If the previous VertexRT task is the task
+     * currently executing, suspend it directly.
      */
+    TaskHandle_t currentHandle =
+        xTaskGetCurrentTaskHandle();
+
     if (previousHandle != NULL &&
         previousHandle != dispatcher_handle &&
         previousHandle != nextBinding->handle)
     {
-        vTaskSuspend(
-            previousHandle);
+        if (previousHandle ==
+            currentHandle)
+        {
+            /*
+             * Current task is blocking itself.
+             *
+             * Suspend the current FreeRTOS task using
+             * the NULL form and let FreeRTOS switch immediately.
+             */
+            vTaskSuspend(NULL);
+        }
+        else
+        {
+            /*
+             * A different backing task is being replaced.
+             */
+            vTaskSuspend(
+                previousHandle);
+        }
     }
 
     /*
-     * Let FreeRTOS perform the runnable-task selection.
+     * For the non-current case, explicitly yield.
+     *
+     * In the current-task case, vTaskSuspend(NULL)
+     * already removes the task from execution.
      */
-    taskYIELD();
+    if (previousHandle !=
+        currentHandle)
+    {
+        taskYIELD();
+    }
 }
 
 void vrt_freertos_backend_exit_current(
