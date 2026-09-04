@@ -55,6 +55,7 @@ extern "C"
         void *argument;
 
         uint8_t priority;
+        uint8_t basePriority;
 
         vrt_task_state_t state;
 

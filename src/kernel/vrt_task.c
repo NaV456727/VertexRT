@@ -2,6 +2,7 @@
 #include "vrt_scheduler.h"
 #include "vrt_port.h"
 #include "vrt_freertos_backend.h"
+#include "vrt_critical.h"
 
 #include <string.h>
 
@@ -69,9 +70,17 @@ void vrt_task_init(
         g_next_task_id = 1U;
     }
 
-    task->entry = entry;
-    task->argument = argument;
-    task->priority = priority;
+    task->entry =
+        entry;
+
+    task->argument =
+        argument;
+
+    task->priority =
+        priority;
+
+    task->basePriority =
+        priority;
 
     task->state =
         VRT_TASK_READY;
@@ -91,10 +100,11 @@ void vrt_task_init(
     /*
      * No delay initially.
      */
-    task->wakeTick = 0U;
+    task->wakeTick =
+        0U;
 
     /*
-     * ESP32 FreeRTOS pxPortInitialiseStack() expects the LAST valid
+     * ESP32 pxPortInitialiseStack() expects the LAST valid
      * stack word.
      */
     uint32_t *stackTop =
@@ -567,20 +577,7 @@ void vrt_task_delay(
     vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    if (scheduler == NULL ||
-        scheduler->currentTask == NULL)
-    {
-        return;
-    }
-
-    /*
-     * The scheduler's currentTask is the logical task
-     * that called delay().
-     */
-    vrt_task_t *task =
-        scheduler->currentTask;
-
-    if (task == NULL)
+    if (scheduler == NULL)
     {
         return;
     }
@@ -595,16 +592,39 @@ void vrt_task_delay(
     }
 
     /*
+     * Enter the kernel critical section BEFORE reading
+     * tickCount or modifying scheduler state.
+     *
+     * This prevents the timer ISR from changing tickCount
+     * halfway through the delay/block transition.
+     */
+    vrt_kernel_critical_enter();
+
+    /*
+     * Re-read the current task while protected.
+     */
+    vrt_task_t *task =
+        scheduler->currentTask;
+
+    if (task == NULL)
+    {
+        vrt_kernel_critical_exit();
+        return;
+    }
+
+    /*
      * Idle task cannot block.
      */
     if (task == scheduler->idleTask ||
         task->isIdle)
     {
+        vrt_kernel_critical_exit();
         return;
     }
 
     /*
-     * Calculate wake-up tick.
+     * Calculate wake-up tick atomically with the
+     * blocking transition.
      */
     task->wakeTick =
         scheduler->tickCount + ticks;
@@ -618,9 +638,16 @@ void vrt_task_delay(
     /*
      * Remove task from READY queue.
      */
-    vrt_list_remove(
-        &scheduler->readyQueue,
-        &task->node);
+    if (!vrt_list_remove(
+            &scheduler->readyQueue,
+            &task->node))
+    {
+        task->state =
+            VRT_TASK_RUNNING;
+
+        vrt_kernel_critical_exit();
+        return;
+    }
 
     /*
      * Add task to delayed queue.
@@ -630,7 +657,7 @@ void vrt_task_delay(
             &task->waitNode))
     {
         /*
-         * Roll back if delayed queue insertion fails.
+         * Roll back if delayed queue insertion failed.
          */
         task->state =
             VRT_TASK_RUNNING;
@@ -639,20 +666,19 @@ void vrt_task_delay(
             &scheduler->readyQueue,
             &task->node);
 
+        vrt_kernel_critical_exit();
         return;
     }
 
     /*
      * The blocked task cannot remain current.
-     *
-     * NULL tells the scheduler to select the best
-     * READY task from the queue.
      */
     scheduler->currentTask =
         NULL;
 
     /*
-     * Select the highest-priority READY task.
+     * Select the highest-priority READY task while
+     * the scheduler state is still protected.
      */
     vrt_scheduler_schedule(
         scheduler);
@@ -662,7 +688,8 @@ void vrt_task_delay(
 
     /*
      * No replacement task available.
-     * Restore the current task.
+     *
+     * Roll back the complete delay operation.
      */
     if (next == NULL ||
         next == task)
@@ -681,12 +708,20 @@ void vrt_task_delay(
         scheduler->currentTask =
             task;
 
+        vrt_kernel_critical_exit();
         return;
     }
 
     /*
-     * Ask the high-priority FreeRTOS dispatcher to perform
-     * the actual backing-task transition.
+     * All VertexRT scheduler state is now consistent.
+     *
+     * Leave the critical section BEFORE performing the
+     * physical FreeRTOS task switch.
+     */
+    vrt_kernel_critical_exit();
+
+    /*
+     * Switch to the selected backing task.
      */
     vrt_freertos_backend_switch_to(
         next);

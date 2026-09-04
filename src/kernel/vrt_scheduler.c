@@ -3,6 +3,7 @@
 #include "vrt_config.h"
 #include "esp_attr.h"
 #include "vrt_freertos_backend.h"
+#include "vrt_critical.h"
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -729,16 +730,12 @@ vrt_scheduler_select_preemption_from_isr(void)
     vrt_task_t *current =
         scheduler->currentTask;
 
-    if (current == NULL)
+    if (current == NULL ||
+        current == scheduler->idleTask)
     {
         return NULL;
     }
 
-    /*
-     * Find the highest-priority READY task.
-     *
-     * Do not use ready-queue order here.
-     */
     vrt_task_t *next =
         NULL;
 
@@ -765,9 +762,6 @@ vrt_scheduler_select_preemption_from_isr(void)
             node->next;
     }
 
-    /*
-     * No higher-priority READY task exists.
-     */
     if (next == NULL ||
         next->priority <= current->priority)
     {
@@ -776,18 +770,6 @@ vrt_scheduler_select_preemption_from_isr(void)
 
         return NULL;
     }
-
-    /*
-     * Logical VertexRT transition.
-     */
-    current->state =
-        VRT_TASK_READY;
-
-    next->state =
-        VRT_TASK_RUNNING;
-
-    scheduler->currentTask =
-        next;
 
     scheduler->preemptionPending =
         false;

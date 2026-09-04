@@ -136,12 +136,6 @@ vrt_freertos_dispatcher(
             pdTRUE,
             portMAX_DELAY);
 
-        /*
-         * ---------------------------------------------------------------
-         * Normal preemption request
-         * ---------------------------------------------------------------
-         */
-
         vrt_task_t *next =
             (vrt_task_t *)pending_next_task;
 
@@ -153,6 +147,17 @@ vrt_freertos_dispatcher(
             continue;
         }
 
+        vrt_scheduler_t *scheduler =
+            vrt_scheduler_get_instance();
+
+        if (scheduler == NULL)
+        {
+            continue;
+        }
+
+        vrt_task_t *previous =
+            scheduler->currentTask;
+
         vrt_freertos_binding_t *nextBinding =
             find_binding(next);
 
@@ -162,7 +167,8 @@ vrt_freertos_dispatcher(
         }
 
         /*
-         * Suspend every other VertexRT backing task.
+         * Suspend every VertexRT backing task except
+         * the selected next task.
          */
         for (uint32_t i = 0U;
              i < binding_count;
@@ -182,14 +188,40 @@ vrt_freertos_dispatcher(
                 handle);
         }
 
-        active_freertos_task =
-            nextBinding->handle;
+        /*
+         * Complete the logical transition.
+         */
+        if (previous != NULL &&
+            previous != next &&
+            previous->state ==
+                VRT_TASK_RUNNING)
+        {
+            previous->state =
+                VRT_TASK_READY;
+        }
 
         next->state =
             VRT_TASK_RUNNING;
 
+        scheduler->currentTask =
+            next;
+
+        active_freertos_task =
+            nextBinding->handle;
+
+        /*
+         * Make the selected backing task runnable.
+         */
         vTaskResume(
             nextBinding->handle);
+
+        /*
+         * Dispatcher must stop being runnable.
+         *
+         * Once suspended, FreeRTOS will run the selected
+         * VertexRT backing task.
+         */
+        taskYIELD();
     }
 }
 
@@ -212,14 +244,6 @@ vrt_freertos_task_entry(
         return;
     }
 
-    /*
-     * Backing tasks are created suspended.
-     *
-     * Once resumed by the dispatcher, execution starts here.
-     *
-     * The FreeRTOS task stack now becomes the actual execution context
-     * for this VertexRT task.
-     */
     task->state =
         VRT_TASK_RUNNING;
 
@@ -229,13 +253,11 @@ vrt_freertos_task_entry(
             task->argument);
     }
 
-    /*
-     * Returning from a VertexRT task terminates its backing task.
-     */
-    task->state =
-        VRT_TASK_TERMINATED;
+    vrt_task_exit();
 
-    vTaskDelete(NULL);
+    for (;;)
+    {
+    }
 }
 
 /*

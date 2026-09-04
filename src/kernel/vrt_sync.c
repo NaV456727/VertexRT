@@ -304,9 +304,6 @@ void vrt_mutex_lock(
         return;
     }
 
-    /*
-     * Use the actual executing VertexRT task.
-     */
     vrt_task_t *current =
         vrt_freertos_backend_get_current_task();
 
@@ -315,23 +312,14 @@ void vrt_mutex_lock(
         return;
     }
 
-    /*
-     * Idle task cannot own a mutex.
-     */
     if (current == scheduler->idleTask)
     {
         return;
     }
 
-    /*
-     * Keep scheduler state synchronized.
-     */
     scheduler->currentTask =
         current;
 
-    /*
-     * Mutex is free.
-     */
     if (!mutex->locked)
     {
         mutex->locked = true;
@@ -340,41 +328,22 @@ void vrt_mutex_lock(
         return;
     }
 
-    /*
-     * Current task already owns this mutex.
-     *
-     * Recursive mutexes are not supported yet.
-     */
     if (mutex->owner == current)
     {
         return;
     }
 
-    /*
-     * Mutex is owned by another task.
-     *
-     * Block current task.
-     */
     current->state =
         VRT_TASK_BLOCKED;
 
-    /*
-     * Remove from ready queue.
-     */
     vrt_list_remove(
         &scheduler->readyQueue,
         &current->node);
 
-    /*
-     * Add to mutex wait queue.
-     */
     if (!vrt_list_push_back(
             &mutex->waitQueue,
             &current->waitNode))
     {
-        /*
-         * Roll back on failure.
-         */
         current->state =
             VRT_TASK_RUNNING;
 
@@ -385,9 +354,14 @@ void vrt_mutex_lock(
         return;
     }
 
-    /*
-     * Select another runnable task.
-     */
+    if (mutex->owner != NULL &&
+        current->priority >
+            mutex->owner->priority)
+    {
+        mutex->owner->priority =
+            current->priority;
+    }
+
     scheduler->currentTask =
         current;
 
@@ -397,9 +371,6 @@ void vrt_mutex_lock(
     vrt_task_t *next =
         scheduler->currentTask;
 
-    /*
-     * Switch actual FreeRTOS execution.
-     */
     if (next != NULL &&
         next != current)
     {
@@ -430,9 +401,6 @@ void vrt_mutex_unlock(
         return;
     }
 
-    /*
-     * Use the actual executing task.
-     */
     vrt_task_t *current =
         vrt_freertos_backend_get_current_task();
 
@@ -444,17 +412,11 @@ void vrt_mutex_unlock(
     scheduler->currentTask =
         current;
 
-    /*
-     * Only the owner may unlock.
-     */
     if (mutex->owner != current)
     {
         return;
     }
 
-    /*
-     * If another task is waiting, transfer ownership.
-     */
     if (!vrt_list_is_empty(
             &mutex->waitQueue))
     {
@@ -474,29 +436,17 @@ void vrt_mutex_unlock(
             return;
         }
 
-        /*
-         * Remove from mutex wait queue.
-         */
         vrt_list_remove(
             &mutex->waitQueue,
             &next->waitNode);
 
-        /*
-         * Make runnable.
-         */
         next->state =
             VRT_TASK_READY;
 
-        /*
-         * Add to ready queue.
-         */
         if (!vrt_list_push_back(
                 &scheduler->readyQueue,
                 &next->node))
         {
-            /*
-             * Roll back on failure.
-             */
             next->state =
                 VRT_TASK_BLOCKED;
 
@@ -507,27 +457,17 @@ void vrt_mutex_unlock(
             return;
         }
 
-        /*
-         * Transfer ownership directly.
-         */
+        current->priority =
+            current->basePriority;
+
         mutex->owner =
             next;
 
         mutex->locked =
             true;
 
-        /*
-         * The task is READY in VertexRT.
-         *
-         * Select it immediately if it outranks the
-         * currently executing task.
-         */
-        vrt_task_t *current =
-            scheduler->currentTask;
-
-        if (current != NULL &&
-            next->priority >
-                current->priority)
+        if (next->priority >
+            current->priority)
         {
             current->state =
                 VRT_TASK_READY;
@@ -545,11 +485,9 @@ void vrt_mutex_unlock(
         return;
     }
 
-    /*
-     * Nobody is waiting.
-     *
-     * Fully release mutex.
-     */
+    current->priority =
+        current->basePriority;
+
     mutex->owner =
         NULL;
 

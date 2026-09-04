@@ -3,195 +3,317 @@
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
 #include "vrt_sync.h"
-#include "vrt_queue.h"
-#include "vrt_preempt_timer.h"
 #include "vrt_freertos_backend.h"
 
 static vrt_scheduler_t *scheduler;
 
-static vrt_task_t taskA;
-static vrt_task_t taskB;
+static vrt_task_t taskL;
+static vrt_task_t taskM;
+static vrt_task_t taskH;
 
-static uint32_t stackA[VRT_STACK_SIZE];
-static uint32_t stackB[VRT_STACK_SIZE];
-
-static vrt_sem_t sem;
 static vrt_mutex_t mutex;
-static vrt_event_group_t events;
 
-static vrt_queue_t queue;
-static uint32_t queueStorage[3];
+static uint32_t stackL[VRT_STACK_SIZE];
+static uint32_t stackM[VRT_STACK_SIZE];
+static uint32_t stackH[VRT_STACK_SIZE];
 
-static volatile bool semPass = false;
-static volatile bool mutexPass = false;
-static volatile bool eventPass = false;
-static volatile bool queuePass = false;
+static volatile bool testReady = false;
 
-static volatile bool semReady = false;
-static volatile bool eventReady = false;
+static volatile bool mAcquired = false;
+static volatile bool hAcquired = false;
 
-static const uint32_t values[5] =
+static volatile bool mSawLRestored = false;
+static volatile bool hSawLRestored = false;
+
+static const char *state_name(vrt_task_state_t state)
+{
+    switch (state)
     {
-        100, 200, 300, 400, 500};
+    case VRT_TASK_READY:
+        return "READY";
+    case VRT_TASK_RUNNING:
+        return "RUNNING";
+    case VRT_TASK_BLOCKED:
+        return "BLOCKED";
+    case VRT_TASK_SUSPENDED:
+        return "SUSPENDED";
+    case VRT_TASK_TERMINATED:
+        return "TERMINATED";
+    default:
+        return "?";
+    }
+}
 
-static uint32_t received[5];
-static uint32_t receivedCount = 0;
+static void dump_state(const char *tag)
+{
+    vrt_task_t *current =
+        scheduler->currentTask;
 
-static void task_a(void *arg)
+    Serial.printf(
+        "[%s] current=%s L=%s(p%u/base%u) M=%s(p%u/base%u) H=%s(p%u/base%u) ready=%lu wait=%lu owner=%s\n",
+        tag,
+        current != NULL ? current->name : "NULL",
+        state_name(taskL.state),
+        taskL.priority,
+        taskL.basePriority,
+        state_name(taskM.state),
+        taskM.priority,
+        taskM.basePriority,
+        state_name(taskH.state),
+        taskH.priority,
+        taskH.basePriority,
+        (unsigned long)vrt_list_size(
+            &scheduler->readyQueue),
+        (unsigned long)vrt_list_size(
+            &mutex.waitQueue),
+        mutex.owner != NULL
+            ? mutex.owner->name
+            : "NULL");
+}
+
+static void task_l(void *arg)
 {
     (void)arg;
 
     Serial.println();
-    Serial.println("========== TASK A ==========");
+    Serial.println(
+        "========== LOW TASK STARTED ==========");
 
-    /*
-     * STEP 18A
-     */
-    Serial.println("18A: waiting semaphore...");
+    vrt_mutex_lock(
+        &mutex);
 
-    vrt_sem_wait(&sem);
+    Serial.println(
+        "L: mutex locked");
 
-    Serial.println("18A: semaphore received.");
-    semPass = true;
+    vrt_task_resume(
+        &taskM);
 
-    /*
-     * STEP 18B
-     */
-    Serial.println("18B: locking mutex...");
+    testReady = true;
 
-    vrt_mutex_lock(&mutex);
+    Serial.println(
+        "L: yielding for M...");
 
-    Serial.println("18B: mutex acquired.");
+    vrt_task_yield();
 
-    vrt_task_delay(4U);
-
-    vrt_mutex_unlock(&mutex);
-
-    Serial.println("18B: mutex released.");
-    mutexPass = true;
-
-    /*
-     * STEP 19
-     */
     Serial.println();
-    Serial.println("========== STEP 19 ==========");
+    Serial.println(
+        "========== L AFTER M BLOCKED ==========");
 
-    eventReady = true;
+    dump_state(
+        "L AFTER M");
 
-    uint32_t result =
-        vrt_event_group_wait_bits(
-            &events,
-            0x01U,
-            false,
-            true);
+    bool mBlocked =
+        taskM.state ==
+        VRT_TASK_BLOCKED;
+
+    bool mInheritance2 =
+        taskL.priority ==
+        taskM.priority;
 
     Serial.printf(
-        "19: event result=0x%02lX current=%s\n",
-        (unsigned long)result,
-        scheduler->currentTask != NULL
-            ? scheduler->currentTask->name
-            : "NULL");
+        "M is BLOCKED: %s\n",
+        mBlocked
+            ? "PASS"
+            : "FAIL");
 
-    if (result == 0x01U)
-    {
-        eventPass = true;
-        Serial.println("19: event PASS.");
-    }
+    Serial.printf(
+        "L inherited M priority: %s (L=%u M=%u)\n",
+        mInheritance2
+            ? "PASS"
+            : "FAIL",
+        taskL.priority,
+        taskM.priority);
 
-    /*
-     * STEP 20
-     */
     Serial.println();
-    Serial.println("========== STEP 20 ==========");
+    Serial.println(
+        "L: resuming H...");
 
-    uint32_t value = 0;
+    vrt_task_resume(
+        &taskH);
 
-    if (!vrt_queue_receive(
-            &queue,
-            &value))
+    Serial.println(
+        "L: yielding for H...");
+
+    vrt_task_yield();
+
+    Serial.println();
+    Serial.println(
+        "========== L AFTER H BLOCKED ==========");
+
+    dump_state(
+        "L AFTER H");
+
+    bool hBlocked =
+        taskH.state ==
+        VRT_TASK_BLOCKED;
+
+    bool mStillBlocked =
+        taskM.state ==
+        VRT_TASK_BLOCKED;
+
+    bool inheritance3 =
+        taskL.priority ==
+        taskH.priority;
+
+    Serial.printf(
+        "H is BLOCKED: %s\n",
+        hBlocked
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "M still BLOCKED: %s\n",
+        mStillBlocked
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "L inherited H priority: %s (L=%u H=%u)\n",
+        inheritance3
+            ? "PASS"
+            : "FAIL",
+        taskL.priority,
+        taskH.priority);
+
+    Serial.println();
+    Serial.println(
+        "L: unlocking mutex...");
+
+    vrt_mutex_unlock(
+        &mutex);
+
+    Serial.println(
+        "L: mutex unlocked");
+
+    while (!mAcquired)
     {
-        Serial.println("20: initial receive failed.");
-        return;
-    }
-
-    if (value != 100U)
-    {
-        Serial.println("20: FIFO failed at 100.");
-        return;
-    }
-
-    received[receivedCount++] = value;
-
-    Serial.println("20: received 100.");
-
-    while (receivedCount < 5U)
-    {
-        if (!vrt_queue_receive(
-                &queue,
-                &value))
-        {
-            Serial.println("20: receive failed.");
-            return;
-        }
-
-        Serial.printf(
-            "20: received %lu\n",
-            (unsigned long)value);
-
-        if (value != values[receivedCount])
-        {
-            Serial.println("20: FIFO mismatch.");
-            return;
-        }
-
-        received[receivedCount++] = value;
-
         vrt_task_yield();
     }
 
-    queuePass = true;
-
-    Serial.println("20: FIFO PASS.");
-
-    /*
-     * FINAL
-     */
     Serial.println();
-    Serial.println("====================================");
-    Serial.println("FINAL REGRESSION TEST");
-    Serial.println("====================================");
+    Serial.println(
+        "========== L OBSERVED M ==========");
 
-    if (semPass &&
-        mutexPass &&
-        eventPass &&
-        queuePass)
+    dump_state(
+        "L AFTER M ACQUIRED");
+
+    bool mOwner =
+        mAcquired;
+
+    Serial.printf(
+        "M acquired mutex: %s\n",
+        mOwner
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "M owns mutex now: %s\n",
+        mutex.owner == &taskM
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "L priority restored: %s (L=%u base=%u)\n",
+        mSawLRestored
+            ? "PASS"
+            : "FAIL",
+        taskL.priority,
+        taskL.basePriority);
+
+    while (!hAcquired)
     {
-        Serial.println("STEP 18: PASS");
-        Serial.println("STEP 19: PASS");
-        Serial.println("STEP 20: PASS");
-        Serial.println("STEP 21: PASS");
-        Serial.println("------------------------------------");
-        Serial.println("ALL FINAL TESTS PASSED");
+        vrt_task_yield();
+    }
+
+    Serial.println();
+    Serial.println(
+        "========== L OBSERVED H ==========");
+
+    dump_state(
+        "L AFTER H ACQUIRED");
+
+    Serial.printf(
+        "H acquired mutex: %s\n",
+        hAcquired
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "H sees L restored: %s\n",
+        hSawLRestored
+            ? "PASS"
+            : "FAIL");
+
+    Serial.println();
+    Serial.println(
+        "========== STEP 4C RESULT ==========");
+
+    Serial.printf(
+        "M blocked           : %s\n",
+        mBlocked
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "M inheritance       : %s\n",
+        mInheritance2
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "H blocked           : %s\n",
+        hBlocked
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "H inheritance       : %s\n",
+        inheritance3
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "M acquired first    : %s\n",
+        mAcquired
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "L restored          : %s\n",
+        mSawLRestored
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "H acquired second   : %s\n",
+        hAcquired
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "L restored final    : %s\n",
+        hSawLRestored
+            ? "PASS"
+            : "FAIL");
+
+    if (mBlocked &&
+        mInheritance2 &&
+        hBlocked &&
+        inheritance3 &&
+        mAcquired &&
+        mSawLRestored &&
+        hAcquired &&
+        hSawLRestored)
+    {
+        Serial.println();
+        Serial.println(
+            "STEP 4C DIAGNOSTIC: PASS");
     }
     else
     {
-        Serial.println("FINAL TEST FAILED");
-
-        Serial.printf(
-            "Semaphore = %s\n",
-            semPass ? "PASS" : "FAIL");
-
-        Serial.printf(
-            "Mutex = %s\n",
-            mutexPass ? "PASS" : "FAIL");
-
-        Serial.printf(
-            "Event = %s\n",
-            eventPass ? "PASS" : "FAIL");
-
-        Serial.printf(
-            "Queue = %s\n",
-            queuePass ? "PASS" : "FAIL");
+        Serial.println();
+        Serial.println(
+            "STEP 4C DIAGNOSTIC: FAIL");
     }
 
     Serial.println(
@@ -199,91 +321,102 @@ static void task_a(void *arg)
 
     for (;;)
     {
-        vrt_task_delay(100U);
+        vrt_task_yield();
     }
 }
 
-static void task_b(void *arg)
+static void task_m(void *arg)
 {
     (void)arg;
 
-    /*
-     * STEP 18A signal
-     */
-    vrt_task_delay(3U);
-
-    Serial.println(
-        "18A: signaling semaphore.");
-
-    vrt_sem_signal(&sem);
-
-    /*
-     * Wait until A has completed the mutex stage.
-     */
-    while (!mutexPass)
+    while (!testReady)
     {
         vrt_task_yield();
     }
 
-    /*
-     * STEP 19 event
-     */
-    while (!eventReady)
+    Serial.println();
+    Serial.println(
+        "========== MEDIUM TASK STARTED ==========");
+
+    Serial.println(
+        "M: attempting mutex...");
+
+    vrt_mutex_lock(
+        &mutex);
+
+    mAcquired =
+        mutex.owner ==
+        &taskM;
+
+    mSawLRestored =
+        taskL.priority ==
+        taskL.basePriority;
+
+    Serial.printf(
+        "M owns mutex: %s\n",
+        mAcquired
+            ? "PASS"
+            : "FAIL");
+
+    Serial.printf(
+        "M sees L restored: %s (L=%u base=%u)\n",
+        mSawLRestored
+            ? "PASS"
+            : "FAIL",
+        taskL.priority,
+        taskL.basePriority);
+
+    vrt_mutex_unlock(
+        &mutex);
+
+    vrt_task_exit();
+}
+
+static void task_h(void *arg)
+{
+    (void)arg;
+
+    while (!testReady)
     {
         vrt_task_yield();
     }
 
-    vrt_task_delay(2U);
+    Serial.println();
+    Serial.println(
+        "========== HIGH TASK STARTED ==========");
 
     Serial.println(
-        "19: setting BIT0.");
+        "H: attempting mutex...");
 
-    vrt_event_group_set_bits(
-        &events,
-        0x01U);
+    vrt_mutex_lock(
+        &mutex);
 
-    /*
-     * STEP 20 queue producer
-     */
-    while (!eventPass)
-    {
-        vrt_task_yield();
-    }
+    hAcquired =
+        mutex.owner ==
+        &taskH;
 
-    /*
-     * Send 100.
-     */
-    vrt_queue_send(
-        &queue,
-        &values[0]);
+    hSawLRestored =
+        taskL.priority ==
+        taskL.basePriority;
 
-    /*
-     * Fill queue.
-     */
-    for (uint32_t i = 1U; i < 4U; ++i)
-    {
-        vrt_queue_send(
-            &queue,
-            &values[i]);
-    }
+    Serial.printf(
+        "H owns mutex: %s\n",
+        hAcquired
+            ? "PASS"
+            : "FAIL");
 
-    Serial.println(
-        "20: queue full, sending 500.");
+    Serial.printf(
+        "H sees L restored: %s (L=%u base=%u)\n",
+        hSawLRestored
+            ? "PASS"
+            : "FAIL",
+        taskL.priority,
+        taskL.basePriority);
 
-    /*
-     * Must block until A receives.
-     */
-    vrt_queue_send(
-        &queue,
-        &values[4]);
+    vrt_mutex_unlock(
+        &mutex);
 
-    Serial.println(
-        "20: 500 sent after wake.");
-
-    for (;;)
-    {
-        vrt_task_delay(100U);
-    }
+    vrt_task_exit();
 }
 
 void setup()
@@ -293,99 +426,107 @@ void setup()
 
     Serial.println();
     Serial.println(
-        "====================================");
+        "============================================================");
     Serial.println(
-        "VertexRT FINAL REGRESSION TEST");
+        "VertexRT v0.2 STEP 4C");
     Serial.println(
-        "Steps 18 -> 21");
+        "MULTIPLE MUTEX WAITERS DIAGNOSTIC");
     Serial.println(
-        "====================================");
+        "============================================================");
 
     scheduler =
         vrt_scheduler_get_instance();
 
+    if (scheduler == NULL)
+    {
+        Serial.println(
+            "ERROR: scheduler is NULL.");
+        return;
+    }
+
     vrt_scheduler_init(
         scheduler);
-
-    vrt_sem_init(
-        &sem,
-        false);
 
     vrt_mutex_init(
         &mutex);
 
-    vrt_event_group_init(
-        &events);
-
-    vrt_queue_init(
-        &queue,
-        queueStorage,
-        sizeof(uint32_t),
-        3U);
+    vrt_task_init(
+        &taskL,
+        task_l,
+        NULL,
+        1,
+        stackL,
+        VRT_STACK_SIZE,
+        "taskL");
 
     vrt_task_init(
-        &taskA,
-        task_a,
+        &taskM,
+        task_m,
         NULL,
         2,
-        stackA,
+        stackM,
         VRT_STACK_SIZE,
-        "taskA");
+        "taskM");
 
     vrt_task_init(
-        &taskB,
-        task_b,
+        &taskH,
+        task_h,
         NULL,
         3,
-        stackB,
+        stackH,
         VRT_STACK_SIZE,
-        "taskB");
+        "taskH");
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskA))
+            &taskL))
     {
-        Serial.println("A add failed.");
+        Serial.println(
+            "ERROR: taskL add failed.");
         return;
     }
 
     if (!vrt_scheduler_add_task(
             scheduler,
-            &taskB))
+            &taskM))
     {
-        Serial.println("B add failed.");
+        Serial.println(
+            "ERROR: taskM add failed.");
         return;
     }
 
-    if (!vrt_preempt_timer_init())
+    if (!vrt_scheduler_add_task(
+            scheduler,
+            &taskH))
     {
-        Serial.println("Timer init failed.");
+        Serial.println(
+            "ERROR: taskH add failed.");
         return;
     }
 
-    if (!vrt_preempt_timer_start())
-    {
-        Serial.println("Timer start failed.");
-        return;
-    }
+    vrt_task_suspend(
+        &taskM);
+
+    vrt_task_suspend(
+        &taskH);
 
     scheduler->currentTask =
-        &taskA;
+        &taskL;
+
+    taskL.state =
+        VRT_TASK_RUNNING;
 
     scheduler->running =
         true;
 
-    taskA.state =
-        VRT_TASK_RUNNING;
-
-    taskB.state =
-        VRT_TASK_READY;
+    dump_state(
+        "INITIAL");
 
     vrt_freertos_backend_start(
-        &taskA);
+        &taskL);
 }
 
 void loop()
 {
-    delay(1000);
+    delay(10);
 }
