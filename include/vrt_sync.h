@@ -22,6 +22,10 @@ extern "C"
 
         vrt_list_t waitQueue;
 
+        void *backendHandle;
+
+        vrt_task_t *timedWaiter;
+
     } vrt_sem_t;
 
     /*=========================================================
@@ -37,6 +41,10 @@ extern "C"
 
     void vrt_sem_signal(
         vrt_sem_t *sem);
+
+    bool vrt_sem_wait_timeout(
+        vrt_sem_t *sem,
+        uint32_t timeoutTicks);
 
     /*=========================================================
      * Mutex

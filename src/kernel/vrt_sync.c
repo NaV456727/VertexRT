@@ -1,6 +1,7 @@
 #include "vrt_sync.h"
 #include "vrt_scheduler.h"
 #include "vrt_freertos_backend.h"
+#include "vrt_critical.h"
 
 #include <stddef.h>
 
@@ -22,8 +23,22 @@ void vrt_sem_init(
     sem->count =
         initialState ? 1U : 0U;
 
+    sem->backendHandle =
+        NULL;
+
+    sem->timedWaiter =
+        NULL;
+
     vrt_list_init(
         &sem->waitQueue);
+
+    if (!vrt_freertos_backend_sem_init(
+            &sem->backendHandle,
+            initialState))
+    {
+        sem->backendHandle =
+            NULL;
+    }
 }
 
 /*
@@ -80,6 +95,13 @@ void vrt_sem_wait(
     if (sem->count > 0U)
     {
         sem->count = 0U;
+
+        if (sem->backendHandle != NULL)
+        {
+            (void)vrt_freertos_backend_sem_take(
+                sem->backendHandle);
+        }
+
         return;
     }
 
@@ -141,6 +163,264 @@ void vrt_sem_wait(
     }
 }
 
+bool vrt_sem_wait_timeout(
+    vrt_sem_t *sem,
+    uint32_t timeoutTicks)
+{
+    if (sem == NULL)
+    {
+        return false;
+    }
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return false;
+    }
+
+    vrt_task_t *current =
+        vrt_freertos_backend_get_current_task();
+
+    if (current == NULL ||
+        current == scheduler->idleTask)
+    {
+        return false;
+    }
+
+    scheduler->currentTask =
+        current;
+
+    /*
+     * Fast path.
+     */
+    if (sem->count > 0U)
+    {
+        sem->count = 0U;
+
+        if (sem->backendHandle != NULL)
+        {
+            (void)vrt_freertos_backend_sem_take(
+                sem->backendHandle);
+        }
+
+        return true;
+    }
+
+    /*
+     * Zero timeout means do not block.
+     */
+    if (timeoutTicks == 0U)
+    {
+        return false;
+    }
+
+    if (sem->backendHandle == NULL)
+    {
+        return false;
+    }
+
+    vrt_kernel_critical_enter();
+
+    /*
+     * Re-check after entering the critical section.
+     */
+    if (sem->count > 0U)
+    {
+        sem->count = 0U;
+
+        (void)vrt_freertos_backend_sem_take(
+            sem->backendHandle);
+
+        vrt_kernel_critical_exit();
+
+        return true;
+    }
+
+    /*
+     * Only one timed waiter is supported in this
+     * first semaphore-timeout step.
+     */
+    if (sem->timedWaiter != NULL)
+    {
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    sem->timedWaiter =
+        current;
+
+    current->state =
+        VRT_TASK_BLOCKED;
+
+    if (!vrt_list_remove(
+            &scheduler->readyQueue,
+            &current->node))
+    {
+        current->state =
+            VRT_TASK_RUNNING;
+
+        sem->timedWaiter =
+            NULL;
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    if (!vrt_list_push_back(
+            &sem->waitQueue,
+            &current->waitNode))
+    {
+        current->state =
+            VRT_TASK_RUNNING;
+
+        sem->timedWaiter =
+            NULL;
+
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    /*
+     * VertexRT chooses who should run while
+     * this task is blocked.
+     */
+    scheduler->currentTask =
+        current;
+
+    vrt_scheduler_schedule(
+        scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    if (next == NULL ||
+        next == current)
+    {
+        vrt_list_remove(
+            &sem->waitQueue,
+            &current->waitNode);
+
+        current->state =
+            VRT_TASK_RUNNING;
+
+        sem->timedWaiter =
+            NULL;
+
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
+
+        scheduler->currentTask =
+            current;
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    vrt_kernel_critical_exit();
+
+    /*
+     * IMPORTANT:
+     *
+     * This function resumes execution in the CURRENT
+     * FreeRTOS backing task and performs xSemaphoreTake()
+     * there. FreeRTOS then blocks the current task.
+     */
+    bool acquired =
+        vrt_freertos_backend_block_current_on_sem(
+            sem->backendHandle,
+            next,
+            timeoutTicks);
+
+    /*
+     * We are back in the waiting task after either:
+     *
+     *   semaphore give
+     *   timeout
+     */
+    vrt_kernel_critical_enter();
+
+    /*
+     * If the wait node is still present, timeout occurred.
+     *
+     * If signal removed it, acquisition succeeded.
+     */
+    if (current->waitNode.list ==
+        &sem->waitQueue)
+    {
+        vrt_list_remove(
+            &sem->waitQueue,
+            &current->waitNode);
+    }
+
+    if (sem->timedWaiter ==
+        current)
+    {
+        sem->timedWaiter =
+            NULL;
+    }
+
+    if (!acquired)
+    {
+        /*
+         * Timed out.
+         */
+        acquired = false;
+    }
+    else
+    {
+        /*
+         * The native semaphore was successfully
+         * acquired by this task.
+         */
+        sem->count =
+            0U;
+    }
+
+    current->state =
+        VRT_TASK_READY;
+
+    if (current->node.list == NULL)
+    {
+        vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
+    }
+
+    vrt_task_t *previous =
+        scheduler->currentTask;
+
+    if (previous != NULL &&
+        previous != current &&
+        previous != scheduler->idleTask &&
+        previous->state ==
+            VRT_TASK_RUNNING)
+    {
+        previous->state =
+            VRT_TASK_READY;
+    }
+
+    current->state =
+        VRT_TASK_RUNNING;
+
+    scheduler->currentTask =
+        current;
+
+    vrt_kernel_critical_exit();
+
+    return acquired;
+}
+
 /*
  * ============================================================================
  * Semaphore Signal
@@ -185,29 +465,60 @@ void vrt_sem_signal(
             return;
         }
 
+        bool isTimedWaiter =
+            (sem->timedWaiter == task);
+
         /*
-         * Remove from semaphore wait queue.
+         * Remove from VertexRT semaphore wait queue.
          */
         vrt_list_remove(
             &sem->waitQueue,
             &task->waitNode);
 
         /*
-         * Make runnable.
+         * If this task is blocked inside the native
+         * FreeRTOS semaphore, release it.
+         *
+         * An ordinary VertexRT semaphore waiter is
+         * not blocked inside xSemaphoreTake(), so
+         * do not give the native semaphore for that case.
+         */
+        if (isTimedWaiter)
+        {
+            sem->timedWaiter =
+                NULL;
+
+            if (sem->backendHandle == NULL ||
+                !vrt_freertos_backend_sem_give(
+                    sem->backendHandle))
+            {
+                /*
+                 * Roll back the VertexRT removal.
+                 */
+                vrt_list_push_back(
+                    &sem->waitQueue,
+                    &task->waitNode);
+
+                sem->timedWaiter =
+                    task;
+
+                return;
+            }
+        }
+
+        /*
+         * Make the task READY.
          */
         task->state =
             VRT_TASK_READY;
 
         /*
-         * Return task to ready queue.
+         * Return task to the READY queue.
          */
         if (!vrt_list_push_back(
                 &scheduler->readyQueue,
                 &task->node))
         {
-            /*
-             * Roll back if insertion failed.
-             */
             task->state =
                 VRT_TASK_BLOCKED;
 
@@ -215,20 +526,31 @@ void vrt_sem_signal(
                 &sem->waitQueue,
                 &task->waitNode);
 
+            if (isTimedWaiter &&
+                sem->backendHandle != NULL)
+            {
+                /*
+                 * Undo the native semaphore give.
+                 */
+                (void)vrt_freertos_backend_sem_take(
+                    sem->backendHandle);
+
+                sem->timedWaiter =
+                    task;
+            }
+
             return;
         }
 
         /*
-         * The task is now READY from VertexRT's perspective.
-         *
-         * Do not directly resume its FreeRTOS backing task.
-         * Let VertexRT decide whether it should run now.
+         * The semaphore has been consumed by the
+         * awakened VertexRT task.
          */
-        sem->count = 0U;
+        sem->count =
+            0U;
 
         /*
-         * Check whether the awakened task should immediately
-         * preempt the current task.
+         * Preempt if the awakened task has higher priority.
          */
         vrt_task_t *current =
             scheduler->currentTask;
@@ -256,9 +578,17 @@ void vrt_sem_signal(
     /*
      * Nobody is waiting.
      *
-     * Make the semaphore available.
+     * Make the semaphore available both logically
+     * and in the native FreeRTOS semaphore.
      */
-    sem->count = 1U;
+    sem->count =
+        1U;
+
+    if (sem->backendHandle != NULL)
+    {
+        (void)vrt_freertos_backend_sem_give(
+            sem->backendHandle);
+    }
 }
 
 /*

@@ -4,6 +4,7 @@
 #include "vrt_task.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -47,6 +48,21 @@ extern "C"
 
     bool vrt_freertos_backend_register_idle(
         vrt_task_t *task);
+
+    bool vrt_freertos_backend_block_current_on_sem(
+        void *handle,
+        vrt_task_t *next,
+        uint32_t timeoutTicks);
+
+    bool vrt_freertos_backend_sem_init(
+        void **handle,
+        bool initialState);
+
+    bool vrt_freertos_backend_sem_take(
+        void *handle);
+
+    bool vrt_freertos_backend_sem_give(
+        void *handle);
 
 #ifdef __cplusplus
 }

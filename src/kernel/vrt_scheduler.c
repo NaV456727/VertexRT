@@ -804,33 +804,28 @@ void vrt_scheduler_start(
         vrt_scheduler_find_ready_task(
             scheduler);
 
-    if (first != NULL)
+    if (first == NULL)
     {
-        first->state =
-            VRT_TASK_RUNNING;
-
-        scheduler->currentTask =
-            first;
-    }
-    else
-    {
-        if (scheduler->idleTask == NULL)
-        {
-            return;
-        }
-
-        scheduler->idleTask->state =
-            VRT_TASK_RUNNING;
-
-        scheduler->currentTask =
+        first =
             scheduler->idleTask;
     }
+
+    if (first == NULL)
+    {
+        return;
+    }
+
+    first->state =
+        VRT_TASK_RUNNING;
+
+    scheduler->currentTask =
+        first;
 
     scheduler->running =
         true;
 
-    vrt_port_start_first_task(
-        scheduler->currentTask->sp);
+    vrt_freertos_backend_start(
+        first);
 
     for (;;)
     {

@@ -6,6 +6,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "freertos/semphr.h"
+#include "vrt_config.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -762,4 +765,149 @@ void vrt_freertos_backend_resume_task(
 
     vTaskResume(
         binding->handle);
+}
+
+bool vrt_freertos_backend_sem_init(
+    void **handle,
+    bool initialState)
+{
+    if (handle == NULL)
+    {
+        return false;
+    }
+
+    SemaphoreHandle_t semaphore =
+        xSemaphoreCreateBinary();
+
+    if (semaphore == NULL)
+    {
+        *handle = NULL;
+        return false;
+    }
+
+    if (initialState)
+    {
+        if (xSemaphoreGive(
+                semaphore) != pdTRUE)
+        {
+            vSemaphoreDelete(
+                semaphore);
+
+            *handle = NULL;
+
+            return false;
+        }
+    }
+
+    *handle =
+        (void *)semaphore;
+
+    return true;
+}
+
+bool vrt_freertos_backend_sem_take(
+    void *handle)
+{
+    if (handle == NULL)
+    {
+        return false;
+    }
+
+    return xSemaphoreTake(
+               (SemaphoreHandle_t)handle,
+               0) == pdTRUE;
+}
+
+bool vrt_freertos_backend_sem_give(
+    void *handle)
+{
+    if (handle == NULL)
+    {
+        return false;
+    }
+
+    return xSemaphoreGive(
+               (SemaphoreHandle_t)handle) == pdTRUE;
+}
+
+bool vrt_freertos_backend_block_current_on_sem(
+    void *handle,
+    vrt_task_t *next,
+    uint32_t timeoutTicks)
+{
+    if (!backend_initialized ||
+        handle == NULL ||
+        next == NULL ||
+        timeoutTicks == 0U)
+    {
+        return false;
+    }
+
+    vrt_freertos_binding_t *nextBinding =
+        find_binding(next);
+
+    if (nextBinding == NULL)
+    {
+        return false;
+    }
+
+    TaskHandle_t currentHandle =
+        xTaskGetCurrentTaskHandle();
+
+    if (currentHandle == NULL ||
+        currentHandle == dispatcher_handle ||
+        currentHandle == nextBinding->handle)
+    {
+        return false;
+    }
+
+    /*
+     * FreeRTOS tick timeout.
+     */
+    uint64_t freertosTicks64 =
+        ((uint64_t)timeoutTicks *
+             (uint64_t)configTICK_RATE_HZ +
+         (uint64_t)VRT_TICK_HZ -
+         1ULL) /
+        (uint64_t)VRT_TICK_HZ;
+
+    if (freertosTicks64 == 0ULL)
+    {
+        freertosTicks64 = 1ULL;
+    }
+
+    TickType_t freertosTicks =
+        (TickType_t)freertosTicks64;
+
+    /*
+     * Make the selected VertexRT backing task runnable.
+     */
+    vTaskResume(
+        nextBinding->handle);
+
+    /*
+     * The current FreeRTOS task is still physically executing
+     * at this exact moment.
+     *
+     * Do NOT change active_freertos_task yet.
+     *
+     * xSemaphoreTake() below will block the current task.
+     */
+    BaseType_t result =
+        xSemaphoreTake(
+            (SemaphoreHandle_t)handle,
+            freertosTicks);
+
+    /*
+     * We are executing here again after:
+     *
+     *   1. semaphore was given
+     *   2. timeout occurred
+     *
+     * The current task is physically running again.
+     */
+    active_freertos_task =
+        currentHandle;
+
+    return result == pdTRUE;
 }
