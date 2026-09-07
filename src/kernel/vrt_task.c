@@ -139,6 +139,7 @@ void vrt_task_init(
     task->eventWaitResult = 0U;
     task->eventWaitForAll = false;
     task->eventClearOnExit = false;
+    task->timedWaitActive = false;
 }
 
 /*

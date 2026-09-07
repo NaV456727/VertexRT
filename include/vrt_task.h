@@ -78,6 +78,8 @@ extern "C"
          */
         uint32_t wakeTick;
 
+        bool timedWaitActive;
+
         /*
          * ================================================================
          * Event group wait state

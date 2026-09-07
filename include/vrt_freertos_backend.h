@@ -64,6 +64,14 @@ extern "C"
     bool vrt_freertos_backend_sem_give(
         void *handle);
 
+    bool vrt_freertos_backend_block_current_timed(
+        vrt_task_t *current,
+        vrt_task_t *next,
+        uint32_t timeoutTicks);
+
+    bool vrt_freertos_backend_wake_timed_task(
+        vrt_task_t *task);
+
 #ifdef __cplusplus
 }
 #endif

@@ -180,20 +180,38 @@ bool vrt_sem_wait_timeout(
         return false;
     }
 
+    /*
+     * Use the task that is physically executing.
+     */
     vrt_task_t *current =
         vrt_freertos_backend_get_current_task();
 
-    if (current == NULL ||
-        current == scheduler->idleTask)
+    if (current == NULL)
     {
         return false;
     }
 
+    /*
+     * Idle task must never block.
+     */
+    if (current == scheduler->idleTask)
+    {
+        return false;
+    }
+
+    /*
+     * Keep scheduler state synchronized with the actual
+     * executing VertexRT task.
+     */
     scheduler->currentTask =
         current;
 
     /*
-     * Fast path.
+     * ========================================================================
+     * Immediate acquisition
+     * ========================================================================
+     *
+     * The semaphore is already available.
      */
     if (sem->count > 0U)
     {
@@ -209,29 +227,37 @@ bool vrt_sem_wait_timeout(
     }
 
     /*
-     * Zero timeout means do not block.
+     * ========================================================================
+     * Zero timeout
+     * ========================================================================
+     *
+     * Non-blocking attempt.
      */
     if (timeoutTicks == 0U)
     {
         return false;
     }
 
-    if (sem->backendHandle == NULL)
-    {
-        return false;
-    }
+    /*
+     * ========================================================================
+     * Enter VertexRT critical section
+     * ========================================================================
+     */
 
     vrt_kernel_critical_enter();
 
     /*
-     * Re-check after entering the critical section.
+     * Recheck availability after entering the critical section.
      */
     if (sem->count > 0U)
     {
         sem->count = 0U;
 
-        (void)vrt_freertos_backend_sem_take(
-            sem->backendHandle);
+        if (sem->backendHandle != NULL)
+        {
+            (void)vrt_freertos_backend_sem_take(
+                sem->backendHandle);
+        }
 
         vrt_kernel_critical_exit();
 
@@ -239,22 +265,38 @@ bool vrt_sem_wait_timeout(
     }
 
     /*
-     * Only one timed waiter is supported in this
-     * first semaphore-timeout step.
+     * ========================================================================
+     * Mark this task as a timed waiter
+     * ========================================================================
+     *
+     * Multiple timed waiters are allowed.
      */
-    if (sem->timedWaiter != NULL)
-    {
-        vrt_kernel_critical_exit();
+    current->timedWaitActive =
+        true;
 
-        return false;
+    /*
+     * Keep timedWaiter as a reference to the first waiter in the queue.
+     *
+     * It is NOT used as a one-waiter restriction.
+     */
+    if (sem->timedWaiter == NULL)
+    {
+        sem->timedWaiter =
+            current;
     }
 
-    sem->timedWaiter =
-        current;
+    /*
+     * ========================================================================
+     * Block current VertexRT task
+     * ========================================================================
+     */
 
     current->state =
         VRT_TASK_BLOCKED;
 
+    /*
+     * Remove current task from the READY queue.
+     */
     if (!vrt_list_remove(
             &scheduler->readyQueue,
             &current->node))
@@ -262,27 +304,11 @@ bool vrt_sem_wait_timeout(
         current->state =
             VRT_TASK_RUNNING;
 
-        sem->timedWaiter =
-            NULL;
-
-        vrt_kernel_critical_exit();
-
-        return false;
-    }
-
-    if (!vrt_list_push_back(
-            &sem->waitQueue,
-            &current->waitNode))
-    {
-        current->state =
-            VRT_TASK_RUNNING;
+        current->timedWaitActive =
+            false;
 
         sem->timedWaiter =
             NULL;
-
-        vrt_list_push_back(
-            &scheduler->readyQueue,
-            &current->node);
 
         vrt_kernel_critical_exit();
 
@@ -290,9 +316,59 @@ bool vrt_sem_wait_timeout(
     }
 
     /*
-     * VertexRT chooses who should run while
-     * this task is blocked.
+     * Add current task to the semaphore wait queue.
      */
+    if (!vrt_list_push_back(
+            &sem->waitQueue,
+            &current->waitNode))
+    {
+        current->state =
+            VRT_TASK_RUNNING;
+
+        current->timedWaitActive =
+            false;
+
+        (void)vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
+
+        /*
+         * Rebuild timedWaiter reference.
+         */
+        if (!vrt_list_is_empty(
+                &sem->waitQueue))
+        {
+            vrt_list_node_t *node =
+                sem->waitQueue.head;
+
+            if (node != NULL)
+            {
+                sem->timedWaiter =
+                    (vrt_task_t *)node->owner;
+            }
+            else
+            {
+                sem->timedWaiter =
+                    NULL;
+            }
+        }
+        else
+        {
+            sem->timedWaiter =
+                NULL;
+        }
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    /*
+     * ========================================================================
+     * Select another runnable VertexRT task
+     * ========================================================================
+     */
+
     scheduler->currentTask =
         current;
 
@@ -302,114 +378,178 @@ bool vrt_sem_wait_timeout(
     vrt_task_t *next =
         scheduler->currentTask;
 
+    /*
+     * ========================================================================
+     * No replacement task available
+     * ========================================================================
+     */
+
     if (next == NULL ||
         next == current)
     {
-        vrt_list_remove(
+        (void)vrt_list_remove(
             &sem->waitQueue,
             &current->waitNode);
 
         current->state =
             VRT_TASK_RUNNING;
 
-        sem->timedWaiter =
-            NULL;
+        current->timedWaitActive =
+            false;
 
-        vrt_list_push_back(
+        (void)vrt_list_push_back(
             &scheduler->readyQueue,
             &current->node);
 
         scheduler->currentTask =
             current;
 
+        /*
+         * Rebuild timedWaiter reference.
+         */
+        if (!vrt_list_is_empty(
+                &sem->waitQueue))
+        {
+            vrt_list_node_t *node =
+                sem->waitQueue.head;
+
+            if (node != NULL)
+            {
+                sem->timedWaiter =
+                    (vrt_task_t *)node->owner;
+            }
+            else
+            {
+                sem->timedWaiter =
+                    NULL;
+            }
+        }
+        else
+        {
+            sem->timedWaiter =
+                NULL;
+        }
+
         vrt_kernel_critical_exit();
 
         return false;
     }
 
+    /*
+     * ========================================================================
+     * Leave VertexRT critical section
+     * ========================================================================
+     *
+     * We must not hold the VertexRT critical section while performing
+     * the native FreeRTOS blocking operation.
+     */
     vrt_kernel_critical_exit();
 
     /*
-     * IMPORTANT:
+     * ========================================================================
+     * Native timed blocking
+     * ========================================================================
      *
-     * This function resumes execution in the CURRENT
-     * FreeRTOS backing task and performs xSemaphoreTake()
-     * there. FreeRTOS then blocks the current task.
+     * Every VertexRT task now has its own native timed-wait semaphore.
+     *
+     * This prevents FreeRTOS from waking a different VertexRT waiter.
      */
     bool acquired =
-        vrt_freertos_backend_block_current_on_sem(
-            sem->backendHandle,
+        vrt_freertos_backend_block_current_timed(
+            current,
             next,
             timeoutTicks);
 
     /*
-     * We are back in the waiting task after either:
+     * ========================================================================
+     * Returned from native blocking
+     * ========================================================================
      *
-     *   semaphore give
-     *   timeout
+     * We get here because:
+     *
+     *   1. This task was explicitly signaled, or
+     *   2. Its timeout expired.
      */
     vrt_kernel_critical_enter();
 
     /*
-     * If the wait node is still present, timeout occurred.
+     * Remove this task from the VertexRT semaphore wait queue if it
+     * is still present.
      *
-     * If signal removed it, acquisition succeeded.
+     * If sem_signal() already removed it, this does nothing.
      */
     if (current->waitNode.list ==
         &sem->waitQueue)
     {
-        vrt_list_remove(
+        (void)vrt_list_remove(
             &sem->waitQueue,
             &current->waitNode);
     }
 
-    if (sem->timedWaiter ==
-        current)
+    /*
+     * This task is no longer a timed waiter.
+     */
+    current->timedWaitActive =
+        false;
+
+    /*
+     * ========================================================================
+     * Rebuild timedWaiter
+     * ========================================================================
+     */
+
+    if (!vrt_list_is_empty(
+            &sem->waitQueue))
+    {
+        vrt_list_node_t *node =
+            sem->waitQueue.head;
+
+        if (node != NULL)
+        {
+            sem->timedWaiter =
+                (vrt_task_t *)node->owner;
+        }
+        else
+        {
+            sem->timedWaiter =
+                NULL;
+        }
+    }
+    else
     {
         sem->timedWaiter =
             NULL;
     }
 
-    if (!acquired)
+    /*
+     * If the native wait succeeded, the semaphore token was consumed
+     * by this task.
+     */
+    if (acquired)
     {
-        /*
-         * Timed out.
-         */
-        acquired = false;
-    }
-    else
-    {
-        /*
-         * The native semaphore was successfully
-         * acquired by this task.
-         */
         sem->count =
             0U;
     }
+
+    /*
+     * ========================================================================
+     * Return task to READY state
+     * ========================================================================
+     */
 
     current->state =
         VRT_TASK_READY;
 
     if (current->node.list == NULL)
     {
-        vrt_list_push_back(
+        (void)vrt_list_push_back(
             &scheduler->readyQueue,
             &current->node);
     }
 
-    vrt_task_t *previous =
-        scheduler->currentTask;
-
-    if (previous != NULL &&
-        previous != current &&
-        previous != scheduler->idleTask &&
-        previous->state ==
-            VRT_TASK_RUNNING)
-    {
-        previous->state =
-            VRT_TASK_READY;
-    }
-
+    /*
+     * Restore current task identity.
+     */
     current->state =
         VRT_TASK_RUNNING;
 
@@ -444,150 +584,230 @@ void vrt_sem_signal(
     }
 
     /*
-     * Wake the first waiting task.
+     * ========================================================================
+     * Find the highest-priority blocked waiter.
+     *
+     * Do NOT simply use waitQueue.head.
+     *
+     * VertexRT semaphore wakeup is priority-based.
+     * ========================================================================
      */
-    if (!vrt_list_is_empty(
-            &sem->waitQueue))
+
+    vrt_task_t *selectedTask =
+        NULL;
+
+    vrt_list_node_t *node =
+        sem->waitQueue.head;
+
+    while (node != NULL)
     {
-        vrt_list_node_t *node =
-            sem->waitQueue.head;
-
-        if (node == NULL)
-        {
-            return;
-        }
-
         vrt_task_t *task =
             (vrt_task_t *)node->owner;
 
-        if (task == NULL)
+        if (task != NULL &&
+            task->state == VRT_TASK_BLOCKED)
         {
-            return;
-        }
-
-        bool isTimedWaiter =
-            (sem->timedWaiter == task);
-
-        /*
-         * Remove from VertexRT semaphore wait queue.
-         */
-        vrt_list_remove(
-            &sem->waitQueue,
-            &task->waitNode);
-
-        /*
-         * If this task is blocked inside the native
-         * FreeRTOS semaphore, release it.
-         *
-         * An ordinary VertexRT semaphore waiter is
-         * not blocked inside xSemaphoreTake(), so
-         * do not give the native semaphore for that case.
-         */
-        if (isTimedWaiter)
-        {
-            sem->timedWaiter =
-                NULL;
-
-            if (sem->backendHandle == NULL ||
-                !vrt_freertos_backend_sem_give(
-                    sem->backendHandle))
+            if (selectedTask == NULL ||
+                task->priority >
+                    selectedTask->priority)
             {
-                /*
-                 * Roll back the VertexRT removal.
-                 */
-                vrt_list_push_back(
-                    &sem->waitQueue,
-                    &task->waitNode);
-
-                sem->timedWaiter =
-                    task;
-
-                return;
-            }
-        }
-
-        /*
-         * Make the task READY.
-         */
-        task->state =
-            VRT_TASK_READY;
-
-        /*
-         * Return task to the READY queue.
-         */
-        if (!vrt_list_push_back(
-                &scheduler->readyQueue,
-                &task->node))
-        {
-            task->state =
-                VRT_TASK_BLOCKED;
-
-            vrt_list_push_back(
-                &sem->waitQueue,
-                &task->waitNode);
-
-            if (isTimedWaiter &&
-                sem->backendHandle != NULL)
-            {
-                /*
-                 * Undo the native semaphore give.
-                 */
-                (void)vrt_freertos_backend_sem_take(
-                    sem->backendHandle);
-
-                sem->timedWaiter =
+                selectedTask =
                     task;
             }
-
-            return;
         }
 
-        /*
-         * The semaphore has been consumed by the
-         * awakened VertexRT task.
-         */
+        node =
+            node->next;
+    }
+
+    /*
+     * ========================================================================
+     * No waiter.
+     *
+     * Store a semaphore token.
+     * ========================================================================
+     */
+
+    if (selectedTask == NULL)
+    {
         sem->count =
-            0U;
+            1U;
 
-        /*
-         * Preempt if the awakened task has higher priority.
-         */
-        vrt_task_t *current =
-            scheduler->currentTask;
-
-        if (current != NULL &&
-            task->priority >
-                current->priority)
+        if (sem->backendHandle != NULL)
         {
-            current->state =
-                VRT_TASK_READY;
-
-            task->state =
-                VRT_TASK_RUNNING;
-
-            scheduler->currentTask =
-                task;
-
-            vrt_freertos_backend_switch_to(
-                task);
+            (void)vrt_freertos_backend_sem_give(
+                sem->backendHandle);
         }
 
         return;
     }
 
     /*
-     * Nobody is waiting.
+     * ========================================================================
+     * Remember whether this task is blocked in a timed native wait.
+     * ========================================================================
+     */
+
+    bool isTimed =
+        selectedTask->timedWaitActive;
+
+    /*
+     * Remove selected task from the VertexRT semaphore wait queue.
+     */
+    if (!vrt_list_remove(
+            &sem->waitQueue,
+            &selectedTask->waitNode))
+    {
+        return;
+    }
+
+    /*
+     * This task is no longer a timed waiter.
+     */
+    selectedTask->timedWaitActive =
+        false;
+
+    /*
+     * ========================================================================
+     * Rebuild the diagnostic timedWaiter pointer.
+     * ========================================================================
+     */
+
+    if (!vrt_list_is_empty(
+            &sem->waitQueue))
+    {
+        vrt_list_node_t *nextNode =
+            sem->waitQueue.head;
+
+        if (nextNode != NULL)
+        {
+            sem->timedWaiter =
+                (vrt_task_t *)nextNode->owner;
+        }
+        else
+        {
+            sem->timedWaiter =
+                NULL;
+        }
+    }
+    else
+    {
+        sem->timedWaiter =
+            NULL;
+    }
+
+    /*
+     * ========================================================================
+     * Wake the selected task's PRIVATE native semaphore.
      *
-     * Make the semaphore available both logically
-     * and in the native FreeRTOS semaphore.
+     * This is the key change.
+     *
+     * Previously all timed waiters shared sem->backendHandle, allowing
+     * FreeRTOS to wake a different waiter from the one VertexRT selected.
+     * ========================================================================
+     */
+
+    if (isTimed)
+    {
+        if (!vrt_freertos_backend_wake_timed_task(
+                selectedTask))
+        {
+            /*
+             * Native wake failed.
+             *
+             * Roll back VertexRT state.
+             */
+            selectedTask->timedWaitActive =
+                true;
+
+            selectedTask->state =
+                VRT_TASK_BLOCKED;
+
+            (void)vrt_list_push_back(
+                &sem->waitQueue,
+                &selectedTask->waitNode);
+
+            if (sem->timedWaiter == NULL)
+            {
+                sem->timedWaiter =
+                    selectedTask;
+            }
+
+            return;
+        }
+    }
+
+    /*
+     * ========================================================================
+     * Make selected task READY.
+     * ========================================================================
+     */
+
+    selectedTask->state =
+        VRT_TASK_READY;
+
+    /*
+     * Put it back into the scheduler READY queue.
+     */
+    if (!vrt_list_push_back(
+            &scheduler->readyQueue,
+            &selectedTask->node))
+    {
+        /*
+         * Roll back if READY queue insertion fails.
+         */
+        selectedTask->state =
+            VRT_TASK_BLOCKED;
+
+        if (isTimed)
+        {
+            selectedTask->timedWaitActive =
+                true;
+        }
+
+        (void)vrt_list_push_back(
+            &sem->waitQueue,
+            &selectedTask->waitNode);
+
+        if (sem->timedWaiter == NULL)
+        {
+            sem->timedWaiter =
+                selectedTask;
+        }
+
+        return;
+    }
+
+    /*
+     * The semaphore token is consumed by the selected waiter.
      */
     sem->count =
-        1U;
+        0U;
 
-    if (sem->backendHandle != NULL)
+    /*
+     * ========================================================================
+     * Preempt current task if the selected waiter has higher priority.
+     * ========================================================================
+     */
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    if (current != NULL &&
+        selectedTask->priority >
+            current->priority)
     {
-        (void)vrt_freertos_backend_sem_give(
-            sem->backendHandle);
+        current->state =
+            VRT_TASK_READY;
+
+        selectedTask->state =
+            VRT_TASK_RUNNING;
+
+        scheduler->currentTask =
+            selectedTask;
+
+        vrt_freertos_backend_switch_to(
+            selectedTask);
     }
 }
 

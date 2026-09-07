@@ -22,6 +22,7 @@ typedef struct
 {
     vrt_task_t *vrtTask;
     TaskHandle_t handle;
+    SemaphoreHandle_t timedWaitSemaphore;
 } vrt_freertos_binding_t;
 
 static vrt_freertos_binding_t
@@ -363,6 +364,21 @@ bool vrt_freertos_backend_register_task(
     }
 
     /*
+     * Each VertexRT task gets its own native semaphore.
+     *
+     * This semaphore is used only when this particular task
+     * performs a timed semaphore wait.
+     */
+    SemaphoreHandle_t timedWaitSemaphore =
+        xSemaphoreCreateBinary();
+
+    if (timedWaitSemaphore == NULL)
+    {
+        vTaskDelete(handle);
+        return false;
+    }
+
+    /*
      * Backing task must not execute until VertexRT selects it.
      */
     vTaskSuspend(
@@ -373,6 +389,9 @@ bool vrt_freertos_backend_register_task(
 
     bindings[binding_count].handle =
         handle;
+
+    bindings[binding_count].timedWaitSemaphore =
+        timedWaitSemaphore;
 
     binding_count++;
 
@@ -417,6 +436,21 @@ bool vrt_freertos_backend_register_idle(
     }
 
     /*
+     * Idle also gets a private timed-wait semaphore so that every
+     * binding has the same structure.
+     *
+     * The idle task itself must never perform a timed wait.
+     */
+    SemaphoreHandle_t timedWaitSemaphore =
+        xSemaphoreCreateBinary();
+
+    if (timedWaitSemaphore == NULL)
+    {
+        vTaskDelete(handle);
+        return false;
+    }
+
+    /*
      * Idle backing task starts suspended.
      *
      * VertexRT will explicitly select it when there
@@ -430,6 +464,9 @@ bool vrt_freertos_backend_register_idle(
 
     bindings[binding_count].handle =
         handle;
+
+    bindings[binding_count].timedWaitSemaphore =
+        timedWaitSemaphore;
 
     binding_count++;
 
@@ -910,4 +947,109 @@ bool vrt_freertos_backend_block_current_on_sem(
         currentHandle;
 
     return result == pdTRUE;
+}
+
+bool vrt_freertos_backend_block_current_timed(
+    vrt_task_t *current,
+    vrt_task_t *next,
+    uint32_t timeoutTicks)
+{
+    if (!backend_initialized ||
+        current == NULL ||
+        next == NULL ||
+        timeoutTicks == 0U)
+    {
+        return false;
+    }
+
+    vrt_freertos_binding_t *currentBinding =
+        find_binding(current);
+
+    vrt_freertos_binding_t *nextBinding =
+        find_binding(next);
+
+    if (currentBinding == NULL ||
+        nextBinding == NULL ||
+        currentBinding->timedWaitSemaphore == NULL)
+    {
+        return false;
+    }
+
+    TaskHandle_t currentHandle =
+        xTaskGetCurrentTaskHandle();
+
+    if (currentHandle == NULL ||
+        currentHandle == dispatcher_handle)
+    {
+        return false;
+    }
+
+    /*
+     * Convert VertexRT ticks to FreeRTOS ticks.
+     */
+    uint64_t freertosTicks64 =
+        ((uint64_t)timeoutTicks *
+             (uint64_t)configTICK_RATE_HZ +
+         (uint64_t)VRT_TICK_HZ -
+         1ULL) /
+        (uint64_t)VRT_TICK_HZ;
+
+    if (freertosTicks64 == 0ULL)
+    {
+        freertosTicks64 = 1ULL;
+    }
+
+    TickType_t freertosTicks =
+        (TickType_t)freertosTicks64;
+
+    /*
+     * Make sure this private semaphore starts empty.
+     */
+    (void)xSemaphoreTake(
+        currentBinding->timedWaitSemaphore,
+        0);
+
+    /*
+     * Make the next VertexRT task physically runnable.
+     */
+    vTaskResume(
+        nextBinding->handle);
+
+    /*
+     * Block THIS task on ITS OWN semaphore.
+     */
+    BaseType_t result =
+        xSemaphoreTake(
+            currentBinding->timedWaitSemaphore,
+            freertosTicks);
+
+    /*
+     * We are physically executing again.
+     */
+    active_freertos_task =
+        currentHandle;
+
+    return result == pdTRUE;
+}
+
+bool vrt_freertos_backend_wake_timed_task(
+    vrt_task_t *task)
+{
+    if (!backend_initialized ||
+        task == NULL)
+    {
+        return false;
+    }
+
+    vrt_freertos_binding_t *binding =
+        find_binding(task);
+
+    if (binding == NULL ||
+        binding->timedWaitSemaphore == NULL)
+    {
+        return false;
+    }
+
+    return xSemaphoreGive(
+               binding->timedWaitSemaphore) == pdTRUE;
 }
