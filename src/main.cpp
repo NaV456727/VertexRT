@@ -4,546 +4,320 @@ extern "C"
 {
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
-#include "vrt_sync.h"
-#include "vrt_freertos_backend.h"
+#include "vrt_timer.h"
+#include "vrt_tick.h"
 #include "vrt_config.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 }
 
-/*
- * ========================================================================
- * Scheduler / semaphore
- * ========================================================================
- */
+/*=========================================================
+ * Software Timers
+ *=========================================================*/
 
-static vrt_scheduler_t *scheduler = nullptr;
-static vrt_sem_t testSem;
+static vrt_timer_t oneShotTimer;
+static vrt_timer_t periodicTimer;
+static vrt_timer_t restartTimer;
 
-static vrt_task_t lowTask;
-static vrt_task_t highTask;
-static vrt_task_t controllerTask;
+/*=========================================================
+ * Test Task Stack
+ *=========================================================*/
 
-static uint32_t __attribute__((aligned(VRT_STACK_ALIGNMENT)))
-lowStack[VRT_STACK_SIZE];
+static uint32_t step8TaskStack[VRT_STACK_SIZE];
 
-static uint32_t __attribute__((aligned(VRT_STACK_ALIGNMENT)))
-highStack[VRT_STACK_SIZE];
+/*=========================================================
+ * Test Counters
+ *=========================================================*/
 
-static uint32_t __attribute__((aligned(VRT_STACK_ALIGNMENT)))
-controllerStack[VRT_STACK_SIZE];
+static volatile uint32_t oneShotCount = 0;
+static volatile uint32_t periodicCount = 0;
+static volatile uint32_t restartCount = 0;
 
-/*
- * ========================================================================
- * Test state
- * ========================================================================
- */
+/*=========================================================
+ * Timer Callbacks
+ *=========================================================*/
 
-static volatile bool lowStarted = false;
-static volatile bool highStarted = false;
-
-static volatile bool lowCompleted = false;
-static volatile bool highCompleted = false;
-
-static volatile bool lowAcquired = false;
-static volatile bool highAcquired = false;
-
-static volatile bool controllerStarted = false;
-
-static volatile uint32_t acquisitionOrder = 0U;
-
-/*
- * ========================================================================
- * LOW PRIORITY WAITER
- *
- * Priority = 2
- *
- * LOW intentionally enters the semaphore wait queue FIRST.
- * ========================================================================
- */
-
-static void low_task(void *argument)
+static void oneShotCallback(void *argument)
 {
     (void)argument;
 
-    lowStarted = true;
+    oneShotCount++;
+
+    Serial.printf(
+        "One-shot timer callback: %lu\n",
+        (unsigned long)oneShotCount);
+}
+
+static void periodicCallback(void *argument)
+{
+    (void)argument;
+
+    periodicCount++;
+
+    Serial.printf(
+        "Periodic timer callback: %lu\n",
+        (unsigned long)periodicCount);
+}
+
+static void restartCallback(void *argument)
+{
+    (void)argument;
+
+    restartCount++;
+
+    Serial.printf(
+        "Restart timer callback: %lu\n",
+        (unsigned long)restartCount);
+}
+
+/*=========================================================
+ * Step 8 Test Task
+ *=========================================================*/
+
+static void step8TestTask(void *argument)
+{
+    (void)argument;
 
     Serial.println();
-    Serial.println("------------------------------------------------------------");
-    Serial.println("LOW PRIORITY WAITER STARTED");
-    Serial.println("------------------------------------------------------------");
+    Serial.println("========================================");
+    Serial.println("STEP 8: SOFTWARE TIMER QUALIFICATION");
+    Serial.println("========================================");
 
-    Serial.println("Priority = 2");
-    Serial.println("LOW enters wait queue first");
-    Serial.println("Waiting on semaphore...");
+    /*-----------------------------------------------------
+     * Initialize software timer subsystem
+     *-----------------------------------------------------*/
 
-    bool result =
-        vrt_sem_wait_timeout(
-            &testSem,
-            50U);
+    vrt_timer_system_init();
 
-    lowCompleted = true;
+    /*-----------------------------------------------------
+     * Create timers
+     *-----------------------------------------------------*/
 
-    if (result)
+    bool oneShotCreated =
+        vrt_timer_create(
+            &oneShotTimer,
+            10U,
+            false,
+            oneShotCallback,
+            NULL);
+
+    bool periodicCreated =
+        vrt_timer_create(
+            &periodicTimer,
+            5U,
+            true,
+            periodicCallback,
+            NULL);
+
+    bool restartCreated =
+        vrt_timer_create(
+            &restartTimer,
+            20U,
+            false,
+            restartCallback,
+            NULL);
+
+    if (!oneShotCreated ||
+        !periodicCreated ||
+        !restartCreated)
     {
-        lowAcquired = true;
+        Serial.println("Timer creation : FAIL");
+        Serial.println("STEP 8 RESULT: FAIL");
 
-        if (acquisitionOrder == 0U)
+        for (;;)
         {
-            acquisitionOrder = 1U;
+            delay(1000);
         }
-
-        Serial.println();
-        Serial.println("LOW PRIORITY WAITER ACQUIRED");
-    }
-    else
-    {
-        Serial.println();
-        Serial.println("LOW PRIORITY WAITER TIMED OUT");
     }
 
-    Serial.print("Low result    : ");
-    Serial.println(
-        result ? "ACQUIRED" : "TIMEOUT");
+    Serial.println("Timer creation : PASS");
 
-    Serial.print("Low priority  : ");
-    Serial.println(
-        lowTask.priority);
+    /*-----------------------------------------------------
+     * Start one-shot and periodic timers
+     *-----------------------------------------------------*/
 
-    Serial.print("Wait queue empty : ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
+    bool oneShotStarted =
+        vrt_timer_start(&oneShotTimer);
 
-    /*
-     * LOW must terminate so the controller can run.
-     */
-    vrt_task_exit();
-}
+    bool periodicStarted =
+        vrt_timer_start(&periodicTimer);
 
-/*
- * ========================================================================
- * HIGH PRIORITY WAITER
- *
- * Priority = 3
- *
- * HIGH is initially suspended.
- * Controller resumes it AFTER LOW is already blocked.
- * ========================================================================
- */
-
-static void high_task(void *argument)
-{
-    (void)argument;
-
-    highStarted = true;
-
-    Serial.println();
-    Serial.println("------------------------------------------------------------");
-    Serial.println("HIGH PRIORITY WAITER STARTED");
-    Serial.println("------------------------------------------------------------");
-
-    Serial.println("Priority = 3");
-    Serial.println("HIGH enters wait queue SECOND");
-    Serial.println("Waiting on semaphore...");
-
-    bool result =
-        vrt_sem_wait_timeout(
-            &testSem,
-            50U);
-
-    highCompleted = true;
-
-    if (result)
+    if (!oneShotStarted || !periodicStarted)
     {
-        highAcquired = true;
+        Serial.println("Timer start : FAIL");
+        Serial.println("STEP 8 RESULT: FAIL");
 
-        if (acquisitionOrder == 0U)
+        for (;;)
         {
-            acquisitionOrder = 2U;
+            delay(1000);
         }
+    }
 
-        Serial.println();
-        Serial.println("HIGH PRIORITY WAITER ACQUIRED");
+    Serial.println("Timer start : PASS");
+
+    /*-----------------------------------------------------
+     * Allow timers to run
+     *-----------------------------------------------------*/
+
+    delay(250);
+
+    uint32_t oneShotAfterFirstRun =
+        oneShotCount;
+
+    uint32_t periodicAfterFirstRun =
+        periodicCount;
+
+    bool oneShotPass =
+        (oneShotAfterFirstRun == 1U);
+
+    bool periodicPass =
+        (periodicAfterFirstRun >= 3U);
+
+    Serial.printf(
+        "One-shot execution : %s (%lu)\n",
+        oneShotPass ? "PASS" : "FAIL",
+        (unsigned long)oneShotAfterFirstRun);
+
+    Serial.printf(
+        "Periodic execution : %s (%lu)\n",
+        periodicPass ? "PASS" : "FAIL",
+        (unsigned long)periodicAfterFirstRun);
+
+    /*-----------------------------------------------------
+     * Stop periodic timer
+     *-----------------------------------------------------*/
+
+    bool periodicStopped =
+        vrt_timer_stop(&periodicTimer);
+
+    uint32_t periodicBeforeStopWait =
+        periodicCount;
+
+    delay(150);
+
+    uint32_t periodicAfterStopWait =
+        periodicCount;
+
+    bool periodicStopPass =
+        periodicStopped &&
+        (periodicAfterStopWait == periodicBeforeStopWait);
+
+    Serial.printf(
+        "Periodic stop : %s\n",
+        periodicStopPass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Start restart timer
+     *-----------------------------------------------------*/
+
+    bool restartStarted =
+        vrt_timer_start(&restartTimer);
+
+    delay(250);
+
+    uint32_t restartAfterFirstStart =
+        restartCount;
+
+    bool restartFirstPass =
+        restartStarted &&
+        (restartAfterFirstStart == 1U);
+
+    Serial.printf(
+        "One-shot restart timer : %s (%lu)\n",
+        restartFirstPass ? "PASS" : "FAIL",
+        (unsigned long)restartAfterFirstStart);
+
+    /*-----------------------------------------------------
+     * Start the same timer again
+     *-----------------------------------------------------*/
+
+    bool restartStartedAgain =
+        vrt_timer_start(&restartTimer);
+
+    delay(250);
+
+    uint32_t restartAfterSecondStart =
+        restartCount;
+
+    bool restartSecondPass =
+        restartStartedAgain &&
+        (restartAfterSecondStart == 2U);
+
+    Serial.printf(
+        "Timer restart : %s (%lu)\n",
+        restartSecondPass ? "PASS" : "FAIL",
+        (unsigned long)restartAfterSecondStart);
+
+    /*-----------------------------------------------------
+     * Delete timers
+     *-----------------------------------------------------*/
+
+    bool oneShotDeleted =
+        vrt_timer_delete(&oneShotTimer);
+
+    bool periodicDeleted =
+        vrt_timer_delete(&periodicTimer);
+
+    bool restartDeleted =
+        vrt_timer_delete(&restartTimer);
+
+    bool deletePass =
+        oneShotDeleted &&
+        periodicDeleted &&
+        restartDeleted;
+
+    Serial.printf(
+        "Timer deletion : %s\n",
+        deletePass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Deleted timer must not restart
+     *-----------------------------------------------------*/
+
+    bool deletedRestart =
+        vrt_timer_start(&oneShotTimer);
+
+    bool deletedRestartPass =
+        (deletedRestart == false);
+
+    Serial.printf(
+        "Deleted timer cannot restart : %s\n",
+        deletedRestartPass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Final result
+     *-----------------------------------------------------*/
+
+    bool overallPass =
+        oneShotPass &&
+        periodicPass &&
+        periodicStopPass &&
+        restartFirstPass &&
+        restartSecondPass &&
+        deletePass &&
+        deletedRestartPass;
+
+    Serial.println();
+    Serial.println("----------------------------------------");
+
+    if (overallPass)
+    {
+        Serial.println("STEP 8 RESULT: PASS");
     }
     else
     {
-        Serial.println();
-        Serial.println("HIGH PRIORITY WAITER TIMED OUT");
+        Serial.println("STEP 8 RESULT: FAIL");
     }
 
-    Serial.print("High result   : ");
-    Serial.println(
-        result ? "ACQUIRED" : "TIMEOUT");
-
-    Serial.print("High priority : ");
-    Serial.println(
-        highTask.priority);
-
-    Serial.print("Wait queue empty : ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
-
-    /*
-     * HIGH must terminate so the controller can run.
-     */
-    vrt_task_exit();
-}
-
-/*
- * ========================================================================
- * CONTROLLER
- *
- * Priority = 1
- *
- * Sequence:
- *
- * 1. LOW blocks first.
- * 2. Controller gets CPU.
- * 3. Controller resumes HIGH.
- * 4. HIGH blocks second.
- * 5. Controller signals once.
- * 6. HIGH must acquire first.
- * 7. Controller signals again.
- * 8. LOW must acquire second.
- * ========================================================================
- */
-
-static void controller_task(void *argument)
-{
-    (void)argument;
-
-    controllerStarted = true;
-
-    Serial.println();
-    Serial.println("------------------------------------------------------------");
-    Serial.println("CONTROLLER TASK STARTED");
-    Serial.println("------------------------------------------------------------");
-
-    /*
-     * Give LOW enough time to enter the semaphore wait queue.
-     */
-    vTaskDelay(
-        pdMS_TO_TICKS(20));
-
-    Serial.println();
-    Serial.println("============================================================");
-    Serial.println("BEFORE RESUMING HIGH");
-    Serial.println("============================================================");
-
-    Serial.print("Low started      : ");
-    Serial.println(
-        lowStarted ? "YES" : "NO");
-
-    Serial.print("Low completed    : ");
-    Serial.println(
-        lowCompleted ? "YES" : "NO");
-
-    Serial.print("High started     : ");
-    Serial.println(
-        highStarted ? "YES" : "NO");
-
-    Serial.print("High completed   : ");
-    Serial.println(
-        highCompleted ? "YES" : "NO");
-
-    Serial.print("Wait queue empty : ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
-
-    Serial.print("Timed waiter     : ");
-    Serial.println(
-        (uintptr_t)testSem.timedWaiter,
-        HEX);
-
-    /*
-     * LOW must already be waiting.
-     */
-    if (!lowStarted ||
-        lowCompleted ||
-        vrt_list_is_empty(&testSem.waitQueue))
-    {
-        Serial.println();
-        Serial.println(
-            "ERROR: LOW did not enter wait queue correctly");
-    }
-
-    /*
-     * Resume HIGH.
-     */
-    Serial.println();
-    Serial.println(
-        "CONTROLLER: resuming HIGH priority waiter");
-
-    vrt_task_resume(
-        &highTask);
-
-    /*
-     * Give HIGH enough time to enter its wait.
-     */
-    vTaskDelay(
-        pdMS_TO_TICKS(20));
-
-    Serial.println();
-    Serial.println("============================================================");
-    Serial.println("BOTH WAITERS SHOULD NOW BE BLOCKED");
-    Serial.println("============================================================");
-
-    Serial.print("Low completed  : ");
-    Serial.println(
-        lowCompleted ? "YES" : "NO");
-
-    Serial.print("High completed : ");
-    Serial.println(
-        highCompleted ? "YES" : "NO");
-
-    Serial.print("Wait queue empty : ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
-
-    Serial.print("Timed waiter : ");
-    Serial.println(
-        (uintptr_t)testSem.timedWaiter,
-        HEX);
-
-    /*
-     * ------------------------------------------------------------
-     * FIRST SIGNAL
-     * ------------------------------------------------------------
-     */
-
-    Serial.println();
-    Serial.println(
-        "CONTROLLER: FIRST SEMAPHORE SIGNAL");
-
-    vrt_sem_signal(
-        &testSem);
-
-    Serial.println(
-        "First signal complete");
-
-    /*
-     * Give HIGH time to acquire and exit.
-     */
-    vTaskDelay(
-        pdMS_TO_TICKS(30));
-
-    Serial.println();
-    Serial.println("============================================================");
-    Serial.println("AFTER FIRST SIGNAL");
-    Serial.println("============================================================");
-
-    Serial.print("Low completed  : ");
-    Serial.println(
-        lowCompleted ? "YES" : "NO");
-
-    Serial.print("Low acquired   : ");
-    Serial.println(
-        lowAcquired ? "YES" : "NO");
-
-    Serial.print("High completed : ");
-    Serial.println(
-        highCompleted ? "YES" : "NO");
-
-    Serial.print("High acquired  : ");
-    Serial.println(
-        highAcquired ? "YES" : "NO");
-
-    Serial.print("Acquisition order : ");
-    Serial.println(
-        acquisitionOrder);
-
-    Serial.print("Wait queue empty : ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
-
-    /*
-     * HIGH must have acquired first.
-     */
-    bool firstSignalPass =
-        highAcquired &&
-        !lowAcquired &&
-        highCompleted;
-
-    Serial.print(
-        "HIGH selected first : ");
-
-    Serial.println(
-        firstSignalPass
-            ? "PASS"
-            : "FAIL");
-
-    /*
-     * ------------------------------------------------------------
-     * SECOND SIGNAL
-     * ------------------------------------------------------------
-     *
-     * LOW should now be the only remaining waiter.
-     */
-
-    Serial.println();
-    Serial.println(
-        "CONTROLLER: SECOND SEMAPHORE SIGNAL");
-
-    vrt_sem_signal(
-        &testSem);
-
-    Serial.println(
-        "Second signal complete");
-
-    /*
-     * Give LOW time to acquire and exit.
-     */
-    vTaskDelay(
-        pdMS_TO_TICKS(30));
-
-    Serial.println();
-    Serial.println("============================================================");
-    Serial.println("AFTER SECOND SIGNAL");
-    Serial.println("============================================================");
-
-    Serial.print("Low completed  : ");
-    Serial.println(
-        lowCompleted ? "YES" : "NO");
-
-    Serial.print("Low acquired   : ");
-    Serial.println(
-        lowAcquired ? "YES" : "NO");
-
-    Serial.print("High completed : ");
-    Serial.println(
-        highCompleted ? "YES" : "NO");
-
-    Serial.print("High acquired  : ");
-    Serial.println(
-        highAcquired ? "YES" : "NO");
-
-    Serial.print("Semaphore count : ");
-    Serial.println(
-        testSem.count);
-
-    Serial.print("Timed waiter    : ");
-    Serial.println(
-        (uintptr_t)testSem.timedWaiter,
-        HEX);
-
-    Serial.print("Wait queue empty: ");
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "YES"
-            : "NO");
-
-    /*
-     * LOW must have acquired second.
-     */
-    bool secondSignalPass =
-        lowAcquired &&
-        lowCompleted &&
-        highAcquired &&
-        highCompleted;
-
-    Serial.print(
-        "LOW selected second : ");
-
-    Serial.println(
-        secondSignalPass
-            ? "PASS"
-            : "FAIL");
-
-    /*
-     * ------------------------------------------------------------
-     * FINAL RESULT
-     * ------------------------------------------------------------
-     */
-
-    bool finalPass =
-        firstSignalPass &&
-        secondSignalPass &&
-        vrt_list_is_empty(&testSem.waitQueue) &&
-        testSem.timedWaiter == nullptr &&
-        testSem.count == 0U;
-
-    Serial.println();
-    Serial.println("============================================================");
-    Serial.println("STEP 5F RESULT");
-    Serial.println("============================================================");
-
-    Serial.print(
-        "HIGH priority waiter selected first : ");
-
-    Serial.println(
-        firstSignalPass
-            ? "PASS"
-            : "FAIL");
-
-    Serial.print(
-        "LOW waiter selected second : ");
-
-    Serial.println(
-        secondSignalPass
-            ? "PASS"
-            : "FAIL");
-
-    Serial.print(
-        "Wait queue cleaned : ");
-
-    Serial.println(
-        vrt_list_is_empty(&testSem.waitQueue)
-            ? "PASS"
-            : "FAIL");
-
-    Serial.print(
-        "Timed waiter cleared : ");
-
-    Serial.println(
-        testSem.timedWaiter == nullptr
-            ? "PASS"
-            : "FAIL");
-
-    Serial.print(
-        "Semaphore count cleared : ");
-
-    Serial.println(
-        testSem.count == 0U
-            ? "PASS"
-            : "FAIL");
-
-    Serial.println();
-
-    if (finalPass)
-    {
-        Serial.println(
-            "STEP 5F DIAGNOSTIC: PASS");
-    }
-    else
-    {
-        Serial.println(
-            "STEP 5F DIAGNOSTIC: FAIL");
-    }
-
-    Serial.println(
-        "============================================================");
+    Serial.println("----------------------------------------");
 
     for (;;)
     {
-        vrt_task_yield();
+        delay(1000);
     }
 }
 
-/*
- * ========================================================================
- * SETUP
- * ========================================================================
- */
+/*=========================================================
+ * Arduino Setup
+ *=========================================================*/
 
 void setup()
 {
@@ -552,179 +326,127 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("============================================================");
-    Serial.println("VertexRT v0.2 STEP 5F");
-    Serial.println("SEMAPHORE PRIORITY ORDERING");
-    Serial.println("============================================================");
+    Serial.println("========================================");
+    Serial.println("VertexRT Step 8 Test");
+    Serial.println("========================================");
 
-    scheduler =
+    /*-----------------------------------------------------
+     * Get scheduler
+     *-----------------------------------------------------*/
+
+    vrt_scheduler_t *scheduler =
         vrt_scheduler_get_instance();
 
-    if (scheduler == nullptr)
+    if (scheduler == NULL)
     {
-        Serial.println(
-            "ERROR: scheduler instance is NULL");
+        Serial.println("Scheduler instance : FAIL");
 
-        return;
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
-    Serial.print(
-        "Using scheduler instance = ");
+    /*-----------------------------------------------------
+     * Initialize scheduler
+     *-----------------------------------------------------*/
 
-    Serial.println(
-        (uintptr_t)scheduler,
-        HEX);
+    vrt_scheduler_init(scheduler);
 
-    vrt_scheduler_init(
-        scheduler);
+    Serial.println("Scheduler init : PASS");
 
-    Serial.println(
-        "Scheduler initialized");
+    /*-----------------------------------------------------
+     * Initialize software timer subsystem
+     *-----------------------------------------------------*/
 
-    /*
-     * Empty semaphore.
-     */
-    vrt_sem_init(
-        &testSem,
-        false);
+    vrt_timer_system_init();
 
-    Serial.println(
-        "Semaphore initialized: EMPTY");
+    Serial.println("Software timer system init : PASS");
 
-    Serial.print(
-        "Backend semaphore = ");
+    /*-----------------------------------------------------
+     * Initialize and start kernel tick
+     *-----------------------------------------------------*/
 
-    Serial.println(
-        (uintptr_t)testSem.backendHandle,
-        HEX);
+    if (!vrt_tick_init())
+    {
+        Serial.println("Kernel tick init : FAIL");
 
-    /*
-     * ------------------------------------------------------------
-     * LOW
-     * ------------------------------------------------------------
-     */
+        for (;;)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println("Kernel tick init : PASS");
+
+    if (!vrt_tick_start())
+    {
+        Serial.println("Kernel tick start : FAIL");
+
+        for (;;)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println("Kernel tick start : PASS");
+
+    /*-----------------------------------------------------
+     * Create Step 8 test task
+     *-----------------------------------------------------*/
+
+    static vrt_task_t testTask;
 
     vrt_task_init(
-        &lowTask,
-        low_task,
-        nullptr,
-        2U,
-        lowStack,
+        &testTask,
+        step8TestTask,
+        NULL,
+        2,
+        step8TaskStack,
         VRT_STACK_SIZE,
-        "lowTask");
+        "Step8");
 
-    if (lowTask.sp == nullptr)
-    {
-        Serial.println(
-            "ERROR: lowTask SP is NULL");
+    /*-----------------------------------------------------
+     * Add task to scheduler
+     *-----------------------------------------------------*/
 
-        return;
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * HIGH
-     * ------------------------------------------------------------
-     */
-
-    vrt_task_init(
-        &highTask,
-        high_task,
-        nullptr,
-        3U,
-        highStack,
-        VRT_STACK_SIZE,
-        "highTask");
-
-    if (highTask.sp == nullptr)
-    {
-        Serial.println(
-            "ERROR: highTask SP is NULL");
-
-        return;
-    }
-
-    /*
-     * ------------------------------------------------------------
-     * CONTROLLER
-     * ------------------------------------------------------------
-     */
-
-    vrt_task_init(
-        &controllerTask,
-        controller_task,
-        nullptr,
-        1U,
-        controllerStack,
-        VRT_STACK_SIZE,
-        "controller");
-
-    if (controllerTask.sp == nullptr)
-    {
-        Serial.println(
-            "ERROR: controller SP is NULL");
-
-        return;
-    }
-
-    /*
-     * Add all tasks.
-     */
-    if (!vrt_scheduler_add_task(
+    bool taskAdded =
+        vrt_scheduler_add_task(
             scheduler,
-            &lowTask))
-    {
-        Serial.println(
-            "ERROR: failed to add lowTask");
+            &testTask);
 
-        return;
+    if (!taskAdded)
+    {
+        Serial.println("Test task add : FAIL");
+
+        for (;;)
+        {
+            delay(1000);
+        }
     }
 
-    if (!vrt_scheduler_add_task(
-            scheduler,
-            &highTask))
+    Serial.println("Test task ready : PASS");
+
+    /*-----------------------------------------------------
+     * Start scheduler
+     *-----------------------------------------------------*/
+
+    Serial.println("Starting scheduler...");
+
+    vrt_scheduler_start(scheduler);
+
+    /* Should never return */
+    for (;;)
     {
-        Serial.println(
-            "ERROR: failed to add highTask");
-
-        return;
+        delay(1000);
     }
-
-    if (!vrt_scheduler_add_task(
-            scheduler,
-            &controllerTask))
-    {
-        Serial.println(
-            "ERROR: failed to add controller");
-
-        return;
-    }
-
-    /*
-     * HIGH starts suspended so LOW is guaranteed to enter the
-     * semaphore wait queue first.
-     */
-    vrt_task_suspend(
-        &highTask);
-
-    Serial.println(
-        "HIGH task initially suspended");
-
-    Serial.println(
-        "All tasks added");
-
-    /*
-     * Start scheduler.
-     */
-    Serial.println();
-    Serial.println(
-        "Starting VertexRT scheduler...");
-    Serial.println();
-
-    vrt_scheduler_start(
-        scheduler);
 }
+
+/*=========================================================
+ * Arduino Loop
+ *=========================================================*/
 
 void loop()
 {
+    delay(1000);
 }

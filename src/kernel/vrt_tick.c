@@ -1,4 +1,5 @@
 #include "vrt_tick.h"
+#include "vrt_timer.h"
 
 #include "vrt_scheduler.h"
 #include "vrt_config.h"
@@ -54,6 +55,12 @@ static void vrt_tick_callback(void *argument)
      */
     vrt_scheduler_tick(
         scheduler);
+
+    /*
+     * Process VertexRT software timers after the tick
+     * has advanced.
+     */
+    vrt_timer_process_tick();
 }
 
 /*
