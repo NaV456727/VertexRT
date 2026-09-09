@@ -4,6 +4,9 @@
 #include "vrt_freertos_backend.h"
 #include "vrt_critical.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include <string.h>
 
 /*
@@ -144,6 +147,67 @@ void vrt_task_init(
 
 /*
  * ============================================================================
+ * Stack monitoring
+ * ============================================================================
+ */
+
+/*
+ * Return the minimum free stack space that has remained for this
+ * VertexRT task's FreeRTOS backing task.
+ */
+size_t vrt_task_stack_high_water_mark(
+    const vrt_task_t *task)
+{
+    return vrt_freertos_backend_stack_free(
+        task);
+}
+
+/*
+ * Return the peak stack usage in bytes.
+ *
+ * FreeRTOS high-water mark = minimum free stack ever observed.
+ * Therefore:
+ *
+ *     peak used = total stack - minimum free
+ */
+size_t vrt_task_stack_used(
+    const vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return 0U;
+    }
+
+    size_t freeHighWater =
+        vrt_task_stack_high_water_mark(
+            task);
+
+    size_t totalStackBytes =
+        2048U * sizeof(StackType_t);
+
+    if (freeHighWater >= totalStackBytes)
+    {
+        return 0U;
+    }
+
+    return totalStackBytes -
+           freeHighWater;
+}
+
+/*
+ * Return the minimum remaining stack headroom.
+ *
+ * This is the FreeRTOS high-water-mark value.
+ */
+size_t vrt_task_stack_free(
+    const vrt_task_t *task)
+{
+    return vrt_task_stack_high_water_mark(
+        task);
+}
+
+/*
+ * ============================================================================
  * Task yield
  * ============================================================================
  */
@@ -223,22 +287,14 @@ void vrt_task_exit(void)
     }
 
     /*
-     * ------------------------------------------------------------------------
      * Mark terminated.
-     * ------------------------------------------------------------------------
      */
-
     current->state =
         VRT_TASK_TERMINATED;
 
     /*
-     * ------------------------------------------------------------------------
      * Remove from ready queue.
-     * ------------------------------------------------------------------------
-     *
-     * A running task remains in readyQueue in the current scheduler model.
      */
-
     vrt_list_remove(
         &scheduler->readyQueue,
         &current->node);
@@ -255,14 +311,8 @@ void vrt_task_exit(void)
         current;
 
     /*
-     * ------------------------------------------------------------------------
      * Select another runnable task.
-     * ------------------------------------------------------------------------
-     *
-     * scheduler->currentTask still points to the terminated task,
-     * so scheduler_schedule() will select another READY task.
      */
-
     vrt_scheduler_schedule(
         scheduler);
 
@@ -278,13 +328,6 @@ void vrt_task_exit(void)
 
     /*
      * A terminated task must never continue executing.
-     */
-    for (;;)
-    {
-    }
-
-    /*
-     * Should never return.
      */
     for (;;)
     {
@@ -328,20 +371,14 @@ void vrt_task_suspend(
     }
 
     /*
-     * ------------------------------------------------------------------------
      * Determine whether this is the currently executing task.
-     * ------------------------------------------------------------------------
      */
-
     bool isCurrent =
         (scheduler->currentTask == task);
 
     /*
-     * ------------------------------------------------------------------------
      * Remove from READY queue if present.
-     * ------------------------------------------------------------------------
      */
-
     if (task->state ==
             VRT_TASK_READY ||
         task->state ==
@@ -359,19 +396,11 @@ void vrt_task_suspend(
         VRT_TASK_SUSPENDED;
 
     /*
-     * ------------------------------------------------------------------------
-     * If another task is being suspended, the currently executing task
-     * does not need to be switched.
-     * ------------------------------------------------------------------------
+     * If another task is being suspended, the currently
+     * executing task does not need to be switched.
      */
-
     if (!isCurrent)
     {
-        /*
-         * Suspend the target's actual FreeRTOS backing task.
-         *
-         * It is not the task currently executing this function.
-         */
         vrt_freertos_backend_suspend_task(
             task);
 
@@ -379,43 +408,22 @@ void vrt_task_suspend(
     }
 
     /*
-     * ------------------------------------------------------------------------
      * Current task is suspending itself.
-     *
-     * IMPORTANT:
-     *
-     * Do NOT suspend its FreeRTOS backing task yet.
-     *
-     * The current task must first hand execution to another
-     * VertexRT task.
-     * ------------------------------------------------------------------------
      */
-
     scheduler->currentTask =
         NULL;
 
-    /*
-     * Select another READY task.
-     *
-     * If one exists, scheduler_schedule() will select it.
-     * Otherwise it will select VertexRT idle.
-     */
     vrt_scheduler_schedule(
         scheduler);
 
     vrt_task_t *next =
         scheduler->currentTask;
 
-    /*
-     * A replacement should always exist because VertexRT
-     * now has a real FreeRTOS-backed idle task.
-     */
     if (next == NULL ||
         next == task)
     {
         /*
-         * Roll back the suspension if no replacement
-         * task can be selected.
+         * Roll back suspension if no replacement task exists.
          */
         task->state =
             VRT_TASK_RUNNING;
@@ -431,26 +439,10 @@ void vrt_task_suspend(
     }
 
     /*
-     * ------------------------------------------------------------------------
-     * Select the replacement task physically.
-     * ------------------------------------------------------------------------
-     *
-     * This resumes the replacement task and suspends the
-     * currently executing task.
-     *
-     * The actual current FreeRTOS task is still task.
+     * Switch to replacement task.
      */
     vrt_freertos_backend_switch_to(
         next);
-
-    /*
-     * ------------------------------------------------------------------------
-     * IMPORTANT:
-     *
-     * Execution should never continue in the suspended task
-     * after switch_to() successfully transfers execution.
-     * ------------------------------------------------------------------------
-     */
 }
 
 /*
@@ -478,11 +470,8 @@ void vrt_task_resume(
     }
 
     /*
-     * ------------------------------------------------------------------------
      * Make task READY in VertexRT.
-     * ------------------------------------------------------------------------
      */
-
     task->state =
         VRT_TASK_READY;
 
@@ -500,17 +489,14 @@ void vrt_task_resume(
     }
 
     /*
-     * ------------------------------------------------------------------------
-     * Determine the currently executing VertexRT task.
-     * ------------------------------------------------------------------------
+     * Determine currently executing VertexRT task.
      */
-
     vrt_task_t *current =
         scheduler->currentTask;
 
     /*
-     * If there is no current task, or idle is currently
-     * executing, the resumed task can become current.
+     * If there is no current task, or idle is executing,
+     * the resumed task can become current.
      */
     if (current == NULL ||
         current == scheduler->idleTask)
@@ -529,11 +515,8 @@ void vrt_task_resume(
     }
 
     /*
-     * ------------------------------------------------------------------------
      * Only preempt if the resumed task has higher priority.
-     * ------------------------------------------------------------------------
      */
-
     if (task->priority >
         current->priority)
     {
@@ -549,26 +532,11 @@ void vrt_task_resume(
         vrt_freertos_backend_switch_to(
             task);
     }
-
-    /*
-     * Otherwise leave the task READY.
-     *
-     * The backing FreeRTOS task remains suspended until
-     * VertexRT actually selects it.
-     */
 }
 
 /*
  * ============================================================================
  * Task delay
- * ============================================================================
- *
- * Block the current task until:
- *
- *     scheduler->tickCount + ticks
- *
- * For this cooperative implementation, another task is responsible for
- * advancing the tick.
  * ============================================================================
  */
 
@@ -595,9 +563,6 @@ void vrt_task_delay(
     /*
      * Enter the kernel critical section BEFORE reading
      * tickCount or modifying scheduler state.
-     *
-     * This prevents the timer ISR from changing tickCount
-     * halfway through the delay/block transition.
      */
     vrt_kernel_critical_enter();
 
@@ -624,8 +589,7 @@ void vrt_task_delay(
     }
 
     /*
-     * Calculate wake-up tick atomically with the
-     * blocking transition.
+     * Calculate wake-up tick atomically.
      */
     task->wakeTick =
         scheduler->tickCount + ticks;
@@ -678,8 +642,7 @@ void vrt_task_delay(
         NULL;
 
     /*
-     * Select the highest-priority READY task while
-     * the scheduler state is still protected.
+     * Select highest-priority READY task.
      */
     vrt_scheduler_schedule(
         scheduler);
@@ -714,16 +677,10 @@ void vrt_task_delay(
     }
 
     /*
-     * All VertexRT scheduler state is now consistent.
-     *
-     * Leave the critical section BEFORE performing the
-     * physical FreeRTOS task switch.
+     * Leave critical section before physical task switch.
      */
     vrt_kernel_critical_exit();
 
-    /*
-     * Switch to the selected backing task.
-     */
     vrt_freertos_backend_switch_to(
         next);
 }

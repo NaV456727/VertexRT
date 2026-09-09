@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "vrt_list.h"
 #include "vrt_config.h"
@@ -84,14 +85,8 @@ extern "C"
          * ================================================================
          * Event group wait state
          * ================================================================
-         *
-         * These fields are only meaningful while the task is waiting
-         * on an event group.
          */
 
-        /*
-         * Event group wait state.
-         */
         uint32_t eventWaitBits;
         uint32_t eventWaitResult;
 
@@ -155,6 +150,21 @@ extern "C"
 
     void vrt_task_delay(
         uint32_t ticks);
+
+    /*
+     * ========================================================================
+     * Stack monitoring
+     * ========================================================================
+     */
+
+    size_t vrt_task_stack_used(
+        const vrt_task_t *task);
+
+    size_t vrt_task_stack_free(
+        const vrt_task_t *task);
+
+    size_t vrt_task_stack_high_water_mark(
+        const vrt_task_t *task);
 
 #ifdef __cplusplus
 }

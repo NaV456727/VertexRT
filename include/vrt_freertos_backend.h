@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -71,6 +72,9 @@ extern "C"
 
     bool vrt_freertos_backend_wake_timed_task(
         vrt_task_t *task);
+
+    size_t vrt_freertos_backend_stack_free(
+        const vrt_task_t *task);
 
 #ifdef __cplusplus
 }

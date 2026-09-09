@@ -1053,3 +1053,25 @@ bool vrt_freertos_backend_wake_timed_task(
     return xSemaphoreGive(
                binding->timedWaitSemaphore) == pdTRUE;
 }
+
+size_t vrt_freertos_backend_stack_free(
+    const vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return 0U;
+    }
+
+    vrt_freertos_binding_t *binding =
+        find_binding((vrt_task_t *)task);
+
+    if (binding == NULL ||
+        binding->handle == NULL)
+    {
+        return 0U;
+    }
+
+    return (size_t)uxTaskGetStackHighWaterMark(
+               binding->handle) *
+           sizeof(StackType_t);
+}
