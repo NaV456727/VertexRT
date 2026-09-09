@@ -4,123 +4,44 @@ extern "C"
 {
 #include "vrt_scheduler.h"
 #include "vrt_task.h"
-#include "vrt_timer.h"
+#include "vrt_memory.h"
 #include "vrt_tick.h"
 #include "vrt_config.h"
 }
 
 /*=========================================================
- * Software Timers
- *=========================================================*/
-
-static vrt_timer_t oneShotTimer;
-static vrt_timer_t periodicTimer;
-static vrt_timer_t restartTimer;
-
-/*=========================================================
  * Test Task Stack
  *=========================================================*/
 
-static uint32_t step8TaskStack[VRT_STACK_SIZE];
+static uint32_t step9TaskStack[VRT_STACK_SIZE];
 
 /*=========================================================
- * Test Counters
+ * Test Task
  *=========================================================*/
 
-static volatile uint32_t oneShotCount = 0;
-static volatile uint32_t periodicCount = 0;
-static volatile uint32_t restartCount = 0;
-
-/*=========================================================
- * Timer Callbacks
- *=========================================================*/
-
-static void oneShotCallback(void *argument)
-{
-    (void)argument;
-
-    oneShotCount++;
-
-    Serial.printf(
-        "One-shot timer callback: %lu\n",
-        (unsigned long)oneShotCount);
-}
-
-static void periodicCallback(void *argument)
-{
-    (void)argument;
-
-    periodicCount++;
-
-    Serial.printf(
-        "Periodic timer callback: %lu\n",
-        (unsigned long)periodicCount);
-}
-
-static void restartCallback(void *argument)
-{
-    (void)argument;
-
-    restartCount++;
-
-    Serial.printf(
-        "Restart timer callback: %lu\n",
-        (unsigned long)restartCount);
-}
-
-/*=========================================================
- * Step 8 Test Task
- *=========================================================*/
-
-static void step8TestTask(void *argument)
+static void step9TestTask(void *argument)
 {
     (void)argument;
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("STEP 8: SOFTWARE TIMER QUALIFICATION");
+    Serial.println("STEP 9: MEMORY MANAGEMENT QUALIFICATION");
     Serial.println("========================================");
 
     /*-----------------------------------------------------
-     * Initialize software timer subsystem
+     * Initialize memory manager
      *-----------------------------------------------------*/
 
-    vrt_timer_system_init();
+    bool initPass =
+        vrt_memory_init();
 
-    /*-----------------------------------------------------
-     * Create timers
-     *-----------------------------------------------------*/
+    Serial.printf(
+        "Memory init : %s\n",
+        initPass ? "PASS" : "FAIL");
 
-    bool oneShotCreated =
-        vrt_timer_create(
-            &oneShotTimer,
-            10U,
-            false,
-            oneShotCallback,
-            NULL);
-
-    bool periodicCreated =
-        vrt_timer_create(
-            &periodicTimer,
-            5U,
-            true,
-            periodicCallback,
-            NULL);
-
-    bool restartCreated =
-        vrt_timer_create(
-            &restartTimer,
-            20U,
-            false,
-            restartCallback,
-            NULL);
-
-    if (!oneShotCreated ||
-        !periodicCreated ||
-        !restartCreated)
+    if (!initPass)
     {
-        Serial.println("Timer creation : FAIL");
-        Serial.println("STEP 8 RESULT: FAIL");
+        Serial.println("STEP 9 RESULT: FAIL");
 
         for (;;)
         {
@@ -128,183 +49,271 @@ static void step8TestTask(void *argument)
         }
     }
 
-    Serial.println("Timer creation : PASS");
-
     /*-----------------------------------------------------
-     * Start one-shot and periodic timers
+     * Initial heap state
      *-----------------------------------------------------*/
 
-    bool oneShotStarted =
-        vrt_timer_start(&oneShotTimer);
+    size_t total =
+        vrt_memory_total();
 
-    bool periodicStarted =
-        vrt_timer_start(&periodicTimer);
+    size_t initialFree =
+        vrt_memory_free();
 
-    if (!oneShotStarted || !periodicStarted)
+    bool initialPass =
+        (total == VRT_MEMORY_HEAP_SIZE) &&
+        (initialFree == total);
+
+    Serial.printf(
+        "Initial heap state : %s\n",
+        initialPass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Basic allocation
+     *-----------------------------------------------------*/
+
+    void *a =
+        vrt_malloc(128U);
+
+    void *b =
+        vrt_malloc(256U);
+
+    bool allocationPass =
+        (a != NULL) &&
+        (b != NULL) &&
+        (vrt_memory_free() < initialFree);
+
+    Serial.printf(
+        "Basic allocation : %s\n",
+        allocationPass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Write/read allocated memory
+     *-----------------------------------------------------*/
+
+    bool dataPass =
+        true;
+
+    if (a != NULL)
     {
-        Serial.println("Timer start : FAIL");
-        Serial.println("STEP 8 RESULT: FAIL");
+        uint8_t *bytes =
+            (uint8_t *)a;
 
-        for (;;)
+        for (size_t i = 0; i < 128U; i++)
         {
-            delay(1000);
+            bytes[i] =
+                (uint8_t)(i & 0xFFU);
+        }
+
+        for (size_t i = 0; i < 128U; i++)
+        {
+            if (bytes[i] !=
+                (uint8_t)(i & 0xFFU))
+            {
+                dataPass = false;
+                break;
+            }
+        }
+    }
+    else
+    {
+        dataPass = false;
+    }
+
+    Serial.printf(
+        "Memory read/write : %s\n",
+        dataPass ? "PASS" : "FAIL");
+
+    /*-----------------------------------------------------
+     * Calloc
+     *-----------------------------------------------------*/
+
+    uint32_t *c =
+        (uint32_t *)vrt_calloc(
+            32U,
+            sizeof(uint32_t));
+
+    bool callocPass =
+        (c != NULL);
+
+    if (c != NULL)
+    {
+        for (size_t i = 0; i < 32U; i++)
+        {
+            if (c[i] != 0U)
+            {
+                callocPass = false;
+                break;
+            }
         }
     }
 
-    Serial.println("Timer start : PASS");
+    Serial.printf(
+        "Calloc zeroing : %s\n",
+        callocPass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Allow timers to run
+     * Realloc
      *-----------------------------------------------------*/
 
-    delay(250);
+    bool reallocPass =
+        false;
 
-    uint32_t oneShotAfterFirstRun =
-        oneShotCount;
+    if (a != NULL)
+    {
+        uint8_t *resized =
+            (uint8_t *)vrt_realloc(
+                a,
+                512U);
 
-    uint32_t periodicAfterFirstRun =
-        periodicCount;
+        if (resized != NULL)
+        {
+            reallocPass = true;
 
-    bool oneShotPass =
-        (oneShotAfterFirstRun == 1U);
+            for (size_t i = 0; i < 128U; i++)
+            {
+                if (resized[i] !=
+                    (uint8_t)(i & 0xFFU))
+                {
+                    reallocPass = false;
+                    break;
+                }
+            }
 
-    bool periodicPass =
-        (periodicAfterFirstRun >= 3U);
+            a = resized;
+        }
+    }
 
     Serial.printf(
-        "One-shot execution : %s (%lu)\n",
-        oneShotPass ? "PASS" : "FAIL",
-        (unsigned long)oneShotAfterFirstRun);
-
-    Serial.printf(
-        "Periodic execution : %s (%lu)\n",
-        periodicPass ? "PASS" : "FAIL",
-        (unsigned long)periodicAfterFirstRun);
+        "Realloc / data preservation : %s\n",
+        reallocPass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Stop periodic timer
+     * Free and coalescing
      *-----------------------------------------------------*/
 
-    bool periodicStopped =
-        vrt_timer_stop(&periodicTimer);
+    size_t beforeFree =
+        vrt_memory_free();
 
-    uint32_t periodicBeforeStopWait =
-        periodicCount;
+    vrt_free(b);
 
-    delay(150);
+    size_t afterBFree =
+        vrt_memory_free();
 
-    uint32_t periodicAfterStopWait =
-        periodicCount;
+    vrt_free(c);
 
-    bool periodicStopPass =
-        periodicStopped &&
-        (periodicAfterStopWait == periodicBeforeStopWait);
+    size_t afterCFree =
+        vrt_memory_free();
+
+    vrt_free(a);
+
+    size_t finalFree =
+        vrt_memory_free();
+
+    bool freePass =
+        (afterBFree >= beforeFree) &&
+        (afterCFree >= afterBFree) &&
+        (finalFree == initialFree);
 
     Serial.printf(
-        "Periodic stop : %s\n",
-        periodicStopPass ? "PASS" : "FAIL");
+        "Free / coalescing : %s\n",
+        freePass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Start restart timer
+     * Exhaustion test
      *-----------------------------------------------------*/
 
-    bool restartStarted =
-        vrt_timer_start(&restartTimer);
+    void *blocks[32] = {0};
 
-    delay(250);
+    uint32_t allocatedBlocks =
+        0U;
 
-    uint32_t restartAfterFirstStart =
-        restartCount;
+    for (size_t i = 0; i < 32U; i++)
+    {
+        blocks[i] =
+            vrt_malloc(512U);
 
-    bool restartFirstPass =
-        restartStarted &&
-        (restartAfterFirstStart == 1U);
+        if (blocks[i] == NULL)
+        {
+            break;
+        }
+
+        allocatedBlocks++;
+    }
+
+    void *overflow =
+        vrt_malloc(4096U);
+
+    bool exhaustionPass =
+        (allocatedBlocks > 0U) &&
+        (overflow == NULL);
 
     Serial.printf(
-        "One-shot restart timer : %s (%lu)\n",
-        restartFirstPass ? "PASS" : "FAIL",
-        (unsigned long)restartAfterFirstStart);
+        "Heap exhaustion handling : %s\n",
+        exhaustionPass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Start the same timer again
+     * Free exhaustion allocations
      *-----------------------------------------------------*/
 
-    bool restartStartedAgain =
-        vrt_timer_start(&restartTimer);
+    for (size_t i = 0; i < 32U; i++)
+    {
+        if (blocks[i] != NULL)
+        {
+            vrt_free(blocks[i]);
+        }
+    }
 
-    delay(250);
-
-    uint32_t restartAfterSecondStart =
-        restartCount;
-
-    bool restartSecondPass =
-        restartStartedAgain &&
-        (restartAfterSecondStart == 2U);
+    bool recoveryPass =
+        (vrt_memory_free() == initialFree);
 
     Serial.printf(
-        "Timer restart : %s (%lu)\n",
-        restartSecondPass ? "PASS" : "FAIL",
-        (unsigned long)restartAfterSecondStart);
+        "Heap recovery : %s\n",
+        recoveryPass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Delete timers
+     * Final statistics
      *-----------------------------------------------------*/
 
-    bool oneShotDeleted =
-        vrt_timer_delete(&oneShotTimer);
+    size_t used =
+        vrt_memory_used();
 
-    bool periodicDeleted =
-        vrt_timer_delete(&periodicTimer);
+    size_t freeBytes =
+        vrt_memory_free();
 
-    bool restartDeleted =
-        vrt_timer_delete(&restartTimer);
-
-    bool deletePass =
-        oneShotDeleted &&
-        periodicDeleted &&
-        restartDeleted;
+    bool statisticsPass =
+        (used + freeBytes ==
+         vrt_memory_total());
 
     Serial.printf(
-        "Timer deletion : %s\n",
-        deletePass ? "PASS" : "FAIL");
+        "Heap statistics : %s\n",
+        statisticsPass ? "PASS" : "FAIL");
 
     /*-----------------------------------------------------
-     * Deleted timer must not restart
-     *-----------------------------------------------------*/
-
-    bool deletedRestart =
-        vrt_timer_start(&oneShotTimer);
-
-    bool deletedRestartPass =
-        (deletedRestart == false);
-
-    Serial.printf(
-        "Deleted timer cannot restart : %s\n",
-        deletedRestartPass ? "PASS" : "FAIL");
-
-    /*-----------------------------------------------------
-     * Final result
+     * Overall result
      *-----------------------------------------------------*/
 
     bool overallPass =
-        oneShotPass &&
-        periodicPass &&
-        periodicStopPass &&
-        restartFirstPass &&
-        restartSecondPass &&
-        deletePass &&
-        deletedRestartPass;
+        initPass &&
+        initialPass &&
+        allocationPass &&
+        dataPass &&
+        callocPass &&
+        reallocPass &&
+        freePass &&
+        exhaustionPass &&
+        recoveryPass &&
+        statisticsPass;
 
     Serial.println();
     Serial.println("----------------------------------------");
 
     if (overallPass)
     {
-        Serial.println("STEP 8 RESULT: PASS");
+        Serial.println("STEP 9 RESULT: PASS");
     }
     else
     {
-        Serial.println("STEP 8 RESULT: FAIL");
+        Serial.println("STEP 9 RESULT: FAIL");
     }
 
     Serial.println("----------------------------------------");
@@ -327,11 +336,11 @@ void setup()
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("VertexRT Step 8 Test");
+    Serial.println("VertexRT Step 9 Test");
     Serial.println("========================================");
 
     /*-----------------------------------------------------
-     * Get scheduler
+     * Scheduler
      *-----------------------------------------------------*/
 
     vrt_scheduler_t *scheduler =
@@ -339,7 +348,8 @@ void setup()
 
     if (scheduler == NULL)
     {
-        Serial.println("Scheduler instance : FAIL");
+        Serial.println(
+            "Scheduler instance : FAIL");
 
         for (;;)
         {
@@ -347,41 +357,31 @@ void setup()
         }
     }
 
-    /*-----------------------------------------------------
-     * Initialize scheduler
-     *-----------------------------------------------------*/
+    vrt_scheduler_init(
+        scheduler);
 
-    vrt_scheduler_init(scheduler);
-
-    Serial.println("Scheduler init : PASS");
+    Serial.println(
+        "Scheduler init : PASS");
 
     /*-----------------------------------------------------
-     * Initialize software timer subsystem
-     *-----------------------------------------------------*/
-
-    vrt_timer_system_init();
-
-    Serial.println("Software timer system init : PASS");
-
-    /*-----------------------------------------------------
-     * Initialize and start kernel tick
+     * Kernel tick
      *-----------------------------------------------------*/
 
     if (!vrt_tick_init())
     {
-        Serial.println("Kernel tick init : FAIL");
+        Serial.println(
+            "Kernel tick init : FAIL");
 
         for (;;)
         {
             delay(1000);
         }
     }
-
-    Serial.println("Kernel tick init : PASS");
 
     if (!vrt_tick_start())
     {
-        Serial.println("Kernel tick start : FAIL");
+        Serial.println(
+            "Kernel tick start : FAIL");
 
         for (;;)
         {
@@ -389,35 +389,34 @@ void setup()
         }
     }
 
-    Serial.println("Kernel tick start : PASS");
+    Serial.println(
+        "Kernel tick : PASS");
 
     /*-----------------------------------------------------
-     * Create Step 8 test task
+     * Create test task
      *-----------------------------------------------------*/
 
     static vrt_task_t testTask;
 
     vrt_task_init(
         &testTask,
-        step8TestTask,
+        step9TestTask,
         NULL,
         2,
-        step8TaskStack,
+        step9TaskStack,
         VRT_STACK_SIZE,
-        "Step8");
+        "Step9");
 
     /*-----------------------------------------------------
-     * Add task to scheduler
+     * Add test task
      *-----------------------------------------------------*/
 
-    bool taskAdded =
-        vrt_scheduler_add_task(
+    if (!vrt_scheduler_add_task(
             scheduler,
-            &testTask);
-
-    if (!taskAdded)
+            &testTask))
     {
-        Serial.println("Test task add : FAIL");
+        Serial.println(
+            "Test task add : FAIL");
 
         for (;;)
         {
@@ -425,17 +424,19 @@ void setup()
         }
     }
 
-    Serial.println("Test task ready : PASS");
+    Serial.println(
+        "Test task ready : PASS");
 
     /*-----------------------------------------------------
      * Start scheduler
      *-----------------------------------------------------*/
 
-    Serial.println("Starting scheduler...");
+    Serial.println(
+        "Starting scheduler...");
 
-    vrt_scheduler_start(scheduler);
+    vrt_scheduler_start(
+        scheduler);
 
-    /* Should never return */
     for (;;)
     {
         delay(1000);
