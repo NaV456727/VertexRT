@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 #include <string.h>
 
@@ -683,4 +684,91 @@ void vrt_task_delay(
 
     vrt_freertos_backend_switch_to(
         next);
+}
+
+/*
+ * ============================================================================
+ * Runtime statistics
+ * ============================================================================
+ */
+
+uint64_t vrt_task_runtime_us(
+    const vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return 0U;
+    }
+
+    uint64_t runtime =
+        task->runtimeUs;
+
+    /*
+     * If the task is currently executing, include the
+     * execution interval that is currently in progress.
+     */
+    if (task->runtimeStartUs != 0U &&
+        task->state == VRT_TASK_RUNNING)
+    {
+        uint64_t now =
+            (uint64_t)esp_timer_get_time();
+
+        if (now >=
+            task->runtimeStartUs)
+        {
+            runtime +=
+                now -
+                task->runtimeStartUs;
+        }
+    }
+
+    return runtime;
+}
+
+uint32_t vrt_task_cpu_percent(
+    const vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return 0U;
+    }
+
+    /*
+     * CPU percentage requires a measurement window.
+     *
+     * This API reports runtime relative to a one-second
+     * reference window.
+     *
+     * It is primarily intended for the consolidated
+     * runtime qualification and will be refined when
+     * system-wide statistics are added.
+     */
+    uint64_t runtime =
+        vrt_task_runtime_us(task);
+
+    uint64_t percent =
+        (runtime * 100ULL) /
+        1000000ULL;
+
+    if (percent > 100ULL)
+    {
+        percent = 100ULL;
+    }
+
+    return (uint32_t)percent;
+}
+
+void vrt_task_runtime_reset(
+    vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return;
+    }
+
+    task->runtimeUs =
+        0U;
+
+    task->runtimeStartUs =
+        0U;
 }

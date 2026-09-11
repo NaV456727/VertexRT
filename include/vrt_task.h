@@ -82,6 +82,18 @@ extern "C"
         bool timedWaitActive;
 
         /*
+         * Runtime statistics.
+         *
+         * runtimeUs:
+         *     Total time this task has physically executed.
+         *
+         * runtimeStartUs:
+         *     Timestamp when the current execution interval began.
+         */
+        uint64_t runtimeUs;
+        uint64_t runtimeStartUs;
+
+        /*
          * ================================================================
          * Event group wait state
          * ================================================================
@@ -165,6 +177,21 @@ extern "C"
 
     size_t vrt_task_stack_high_water_mark(
         const vrt_task_t *task);
+
+    /*
+     * ========================================================================
+     * Runtime statistics
+     * ========================================================================
+     */
+
+    uint64_t vrt_task_runtime_us(
+        const vrt_task_t *task);
+
+    uint32_t vrt_task_cpu_percent(
+        const vrt_task_t *task);
+
+    void vrt_task_runtime_reset(
+        vrt_task_t *task);
 
 #ifdef __cplusplus
 }

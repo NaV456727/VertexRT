@@ -15,7 +15,7 @@
  * ============================================================================
  */
 
-static vrt_scheduler_t vrt_scheduler;
+static vrt_scheduler_t *vrt_active_scheduler = NULL;
 
 /*
  * ============================================================================
@@ -147,6 +147,13 @@ void vrt_scheduler_init(
     {
         return;
     }
+
+    /*
+     * This is the scheduler instance used by all VertexRT
+     * kernel APIs that call vrt_scheduler_get_instance().
+     */
+    vrt_active_scheduler =
+        scheduler;
 
     vrt_list_init(
         &scheduler->readyQueue);
@@ -556,7 +563,12 @@ void IRAM_ATTR
 vrt_scheduler_tick_from_isr(void)
 {
     vrt_scheduler_t *scheduler =
-        &vrt_scheduler;
+        vrt_active_scheduler;
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
 
     /*
      * Advance kernel time.
@@ -720,7 +732,12 @@ vrt_task_t *IRAM_ATTR
 vrt_scheduler_select_preemption_from_isr(void)
 {
     vrt_scheduler_t *scheduler =
-        &vrt_scheduler;
+        vrt_active_scheduler;
+
+    if (scheduler == NULL)
+    {
+        return NULL;
+    }
 
     if (!scheduler->running)
     {
@@ -841,5 +858,5 @@ void vrt_scheduler_start(
 vrt_scheduler_t *
 vrt_scheduler_get_instance(void)
 {
-    return &vrt_scheduler;
+    return vrt_active_scheduler;
 }

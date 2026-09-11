@@ -8,6 +8,7 @@
 
 #include "freertos/semphr.h"
 #include "vrt_config.h"
+#include "esp_timer.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -120,6 +121,52 @@ find_task_from_handle(
     }
 
     return NULL;
+}
+
+/*
+ * ============================================================================
+ * Runtime accounting helpers
+ * ============================================================================
+ */
+
+static void vrt_freertos_runtime_start(
+    vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return;
+    }
+
+    task->runtimeStartUs =
+        (uint64_t)esp_timer_get_time();
+}
+
+static void vrt_freertos_runtime_stop(
+    vrt_task_t *task)
+{
+    if (task == NULL)
+    {
+        return;
+    }
+
+    if (task->runtimeStartUs == 0U)
+    {
+        return;
+    }
+
+    uint64_t now =
+        (uint64_t)esp_timer_get_time();
+
+    if (now >=
+        task->runtimeStartUs)
+    {
+        task->runtimeUs +=
+            now -
+            task->runtimeStartUs;
+    }
+
+    task->runtimeStartUs =
+        0U;
 }
 
 /*
@@ -502,6 +549,9 @@ void vrt_freertos_backend_start(
     first->state =
         VRT_TASK_RUNNING;
 
+    vrt_freertos_runtime_start(
+        first);
+
     /*
      * Start the first backing task.
      */
@@ -612,14 +662,38 @@ void vrt_freertos_backend_switch_to(
     vrt_freertos_binding_t *nextBinding =
         find_binding(next);
 
-    if (nextBinding == NULL)
+    if (nextBinding == NULL ||
+        nextBinding->handle == NULL)
     {
         return;
     }
 
+    /*
+     * ------------------------------------------------------------------------
+     * VertexRT keeps track of the backing task that is logically running.
+     *
+     * This is important because switch_to() can be called from:
+     *
+     *   1. the currently executing VertexRT backing task
+     *   2. the ESP timer task
+     *   3. another kernel context
+     *
+     * Therefore xTaskGetCurrentTaskHandle() alone cannot determine the
+     * VertexRT task being replaced.
+     * ------------------------------------------------------------------------
+     */
+
     TaskHandle_t previousHandle =
         active_freertos_task;
 
+    if (previousHandle == NULL)
+    {
+        return;
+    }
+
+    /*
+     * Already running the requested task.
+     */
     if (previousHandle ==
         nextBinding->handle)
     {
@@ -627,15 +701,27 @@ void vrt_freertos_backend_switch_to(
     }
 
     /*
-     * Make next runnable first.
+     * Map the previous backing task back to VertexRT.
      */
-    vTaskResume(
-        nextBinding->handle);
+    vrt_task_t *previousTask =
+        find_task_from_handle(
+            previousHandle);
 
     /*
-     * Update backend ownership before removing
-     * the previous task.
+     * ------------------------------------------------------------------------
+     * Stop runtime accounting for the task being replaced.
+     * ------------------------------------------------------------------------
      */
+
+    vrt_freertos_runtime_stop(
+        previousTask);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Update backend ownership.
+     * ------------------------------------------------------------------------
+     */
+
     active_freertos_task =
         nextBinding->handle;
 
@@ -643,48 +729,87 @@ void vrt_freertos_backend_switch_to(
         VRT_TASK_RUNNING;
 
     /*
-     * If the previous VertexRT task is the task
-     * currently executing, suspend it directly.
+     * Start runtime accounting for the selected task.
      */
-    TaskHandle_t currentHandle =
+    vrt_freertos_runtime_start(
+        next);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Make the selected backing task runnable.
+     * ------------------------------------------------------------------------
+     */
+
+    vTaskResume(
+        nextBinding->handle);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Determine which FreeRTOS task is physically executing this function.
+     * ------------------------------------------------------------------------
+     */
+
+    TaskHandle_t callerHandle =
         xTaskGetCurrentTaskHandle();
 
-    if (previousHandle != NULL &&
-        previousHandle != dispatcher_handle &&
-        previousHandle != nextBinding->handle)
+    /*
+     * ------------------------------------------------------------------------
+     * Case 1:
+     *
+     * switch_to() was called by the VertexRT task being replaced.
+     *
+     * Example:
+     *
+     *     Controller
+     *         ↓
+     *     vrt_task_delay()
+     *         ↓
+     *     switch_to(TaskA)
+     *         ↓
+     *     suspend Controller
+     *
+     * When Controller is eventually resumed, vTaskSuspend() returns and
+     * execution continues normally through this function and back into
+     * vrt_task_delay().
+     * ------------------------------------------------------------------------
+     */
+
+    if (previousHandle ==
+        callerHandle)
     {
-        if (previousHandle ==
-            currentHandle)
-        {
-            /*
-             * Current task is blocking itself.
-             *
-             * Suspend the current FreeRTOS task using
-             * the NULL form and let FreeRTOS switch immediately.
-             */
-            vTaskSuspend(NULL);
-        }
-        else
-        {
-            /*
-             * A different backing task is being replaced.
-             */
-            vTaskSuspend(
-                previousHandle);
-        }
+        vTaskSuspend(
+            callerHandle);
+
+        /*
+         * IMPORTANT:
+         *
+         * Do NOT loop here.
+         *
+         * When this task is later resumed, vTaskSuspend() returns and
+         * this function must return to its caller.
+         */
+        return;
     }
 
     /*
-     * For the non-current case, explicitly yield.
+     * ------------------------------------------------------------------------
+     * Case 2:
      *
-     * In the current-task case, vTaskSuspend(NULL)
-     * already removes the task from execution.
+     * switch_to() was called from another FreeRTOS task, such as the ESP
+     * timer task.
+     *
+     * In this case we must suspend the VertexRT backing task that was
+     * previously running, NOT the caller.
+     * ------------------------------------------------------------------------
      */
-    if (previousHandle !=
-        currentHandle)
-    {
-        taskYIELD();
-    }
+
+    vTaskSuspend(
+        previousHandle);
+
+    /*
+     * Let FreeRTOS schedule the selected backing task.
+     */
+    taskYIELD();
 }
 
 void vrt_freertos_backend_exit_current(
@@ -704,6 +829,13 @@ void vrt_freertos_backend_exit_current(
         return;
     }
 
+    vrt_task_t *currentTask =
+        find_task_from_handle(
+            xTaskGetCurrentTaskHandle());
+
+    vrt_freertos_runtime_stop(
+        currentTask);
+
     /*
      * The current VertexRT task has already been marked
      * TERMINATED by vrt_task_exit().
@@ -715,6 +847,9 @@ void vrt_freertos_backend_exit_current(
 
     next->state =
         VRT_TASK_RUNNING;
+
+    vrt_freertos_runtime_start(
+        next);
 
     /*
      * Make the replacement backing task runnable.

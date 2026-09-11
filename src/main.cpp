@@ -8,511 +8,343 @@ extern "C"
 #include "vrt_tick.h"
 }
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-/*
- * ============================================================================
- * Step 10 Diagnostic Test State
- * ============================================================================
- */
-
 static vrt_scheduler_t scheduler;
-static vrt_task_t testTask;
 
-static uint32_t step10TaskStack[2048];
+static vrt_task_t taskA;
+static vrt_task_t taskB;
+static vrt_task_t controller;
 
-static volatile bool testComplete = false;
+static uint32_t stackA[2048];
+static uint32_t stackB[2048];
+static uint32_t controllerStack[2048];
 
-/*
- * ============================================================================
- * Utility
- * ============================================================================
- */
+static volatile bool taskAStarted = false;
+static volatile bool taskBStarted = false;
 
-static void print_separator()
-{
-    Serial.println("----------------------------------------");
-}
+static volatile uint32_t taskAYields = 0U;
+static volatile uint32_t taskBYields = 0U;
 
 /*
  * ============================================================================
- * Stack Consumption Test
- * ============================================================================
- *
- * This function reports the FreeRTOS high-water mark while the local
- * buffer is actually alive.
- */
-
-__attribute__((noinline)) static void consume_stack_once()
-{
-    volatile uint8_t buffer[512];
-
-    /*
-     * Force every byte to be used.
-     */
-    for (size_t i = 0U;
-         i < sizeof(buffer);
-         ++i)
-    {
-        buffer[i] =
-            (uint8_t)(i ^ 0x5AU);
-    }
-
-    volatile uint8_t check =
-        buffer[sizeof(buffer) - 1U];
-
-    (void)check;
-
-    /*
-     * IMPORTANT:
-     * This measurement happens while buffer[] still exists.
-     */
-    UBaseType_t insideHighWaterWords =
-        uxTaskGetStackHighWaterMark(NULL);
-
-    Serial.println();
-    Serial.println("[DIAGNOSTIC] Inside consume_stack_once()");
-
-    Serial.print(
-        "FreeRTOS high-water words : ");
-
-    Serial.println(
-        (unsigned long)insideHighWaterWords);
-
-    Serial.print(
-        "FreeRTOS high-water bytes : ");
-
-    Serial.println(
-        (unsigned long)(insideHighWaterWords *
-                        sizeof(StackType_t)));
-
-    Serial.print(
-        "sizeof(StackType_t)       : ");
-
-    Serial.println(
-        (unsigned long)sizeof(StackType_t));
-
-    Serial.println(
-        "[DIAGNOSTIC] Leaving consume_stack_once()");
-}
-
-/*
- * ============================================================================
- * Step 10 Test Task
+ * Task A
  * ============================================================================
  */
 
-static void step10TestTask(
+static void taskAEntry(
     void *argument)
 {
     (void)argument;
 
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("STEP 10: STACK MONITORING DIAGNOSTIC");
-    Serial.println("========================================");
+    taskAStarted = true;
 
-    /*
-     * ------------------------------------------------------------------------
-     * Identify the actual FreeRTOS backing task.
-     * ------------------------------------------------------------------------
-     */
-
-    TaskHandle_t currentHandle =
-        xTaskGetCurrentTaskHandle();
-
-    const char *currentName =
-        pcTaskGetName(currentHandle);
-
-    Serial.println();
-    Serial.println("[DIAGNOSTIC] Current FreeRTOS task");
-
-    Serial.print(
-        "Task name                 : ");
-
-    Serial.println(
-        currentName != NULL
-            ? currentName
-            : "<null>");
-
-    Serial.print(
-        "Task handle               : 0x");
-
-    Serial.println(
-        (unsigned long)(uintptr_t)currentHandle,
-        HEX);
-
-    Serial.print(
-        "StackType_t size          : ");
-
-    Serial.println(
-        (unsigned long)sizeof(StackType_t));
-
-    Serial.print(
-        "Configured backing stack  : ");
-
-    Serial.print(
-        2048U);
-
-    Serial.print(
-        " words / ");
-
-    Serial.print(
-        (unsigned long)(2048U *
-                        sizeof(StackType_t)));
-
-    Serial.println(
-        " bytes");
-
-    /*
-     * ------------------------------------------------------------------------
-     * RAW FreeRTOS measurement #1
-     * ------------------------------------------------------------------------
-     */
-
-    UBaseType_t initialRawWords =
-        uxTaskGetStackHighWaterMark(NULL);
-
-    size_t initialRawBytes =
-        (size_t)initialRawWords *
-        sizeof(StackType_t);
-
-    Serial.println();
-    Serial.println(
-        "[DIAGNOSTIC] Initial FreeRTOS measurement");
-
-    Serial.print(
-        "Raw high-water words     : ");
-
-    Serial.println(
-        (unsigned long)initialRawWords);
-
-    Serial.print(
-        "Raw high-water bytes     : ");
-
-    Serial.println(
-        (unsigned long)initialRawBytes);
-
-    /*
-     * ------------------------------------------------------------------------
-     * VertexRT measurement #1
-     * ------------------------------------------------------------------------
-     */
-
-    size_t initialFree =
-        vrt_task_stack_free(&testTask);
-
-    size_t initialUsed =
-        vrt_task_stack_used(&testTask);
-
-    size_t initialHighWater =
-        vrt_task_stack_high_water_mark(
-            &testTask);
-
-    Serial.println();
-    Serial.println(
-        "[DIAGNOSTIC] Initial VertexRT measurement");
-
-    Serial.print(
-        "vrt_task_stack_free()    : ");
-
-    Serial.println(
-        (unsigned long)initialFree);
-
-    Serial.print(
-        "vrt_task_stack_used()    : ");
-
-    Serial.println(
-        (unsigned long)initialUsed);
-
-    Serial.print(
-        "vrt_task_stack_high_water_mark() : ");
-
-    Serial.println(
-        (unsigned long)initialHighWater);
-
-    /*
-     * ------------------------------------------------------------------------
-     * Basic initial-state qualification
-     * ------------------------------------------------------------------------
-     */
-
-    bool initialState =
-        (initialRawWords > 0U &&
-         initialFree > 0U &&
-         initialUsed > 0U);
-
-    Serial.println();
-    Serial.print(
-        "Initial stack state : ");
-
-    Serial.println(
-        initialState
-            ? "PASS"
-            : "FAIL");
-
-    /*
-     * ------------------------------------------------------------------------
-     * Measure immediately before consuming stack.
-     * ------------------------------------------------------------------------
-     */
-
-    UBaseType_t beforeWords =
-        uxTaskGetStackHighWaterMark(NULL);
-
-    Serial.println();
-    Serial.println(
-        "[DIAGNOSTIC] Before consume_stack_once()");
-
-    Serial.print(
-        "FreeRTOS high-water words : ");
-
-    Serial.println(
-        (unsigned long)beforeWords);
-
-    /*
-     * ------------------------------------------------------------------------
-     * Consume stack.
-     * ------------------------------------------------------------------------
-     */
-
-    consume_stack_once();
-
-    /*
-     * ------------------------------------------------------------------------
-     * Measure after returning.
-     * ------------------------------------------------------------------------
-     */
-
-    UBaseType_t afterWords =
-        uxTaskGetStackHighWaterMark(NULL);
-
-    Serial.println();
-    Serial.println(
-        "[DIAGNOSTIC] After consume_stack_once()");
-
-    Serial.print(
-        "FreeRTOS high-water words : ");
-
-    Serial.println(
-        (unsigned long)afterWords);
-
-    Serial.print(
-        "FreeRTOS high-water bytes : ");
-
-    Serial.println(
-        (unsigned long)((size_t)afterWords *
-                        sizeof(StackType_t)));
-
-    /*
-     * ------------------------------------------------------------------------
-     * VertexRT measurement #2
-     * ------------------------------------------------------------------------
-     */
-
-    size_t finalFree =
-        vrt_task_stack_free(&testTask);
-
-    size_t finalUsed =
-        vrt_task_stack_used(&testTask);
-
-    size_t finalHighWater =
-        vrt_task_stack_high_water_mark(
-            &testTask);
-
-    Serial.println();
-    Serial.println(
-        "[DIAGNOSTIC] Final VertexRT measurement");
-
-    Serial.print(
-        "vrt_task_stack_free()    : ");
-
-    Serial.println(
-        (unsigned long)finalFree);
-
-    Serial.print(
-        "vrt_task_stack_used()    : ");
-
-    Serial.println(
-        (unsigned long)finalUsed);
-
-    Serial.print(
-        "vrt_task_stack_high_water_mark() : ");
-
-    Serial.println(
-        (unsigned long)finalHighWater);
-
-    /*
-     * ------------------------------------------------------------------------
-     * Compare raw FreeRTOS result directly.
-     * ------------------------------------------------------------------------
-     */
-
-    bool rawChanged =
-        (afterWords < beforeWords);
-
-    Serial.println();
-    Serial.print(
-        "Raw FreeRTOS watermark changed : ");
-
-    Serial.println(
-        rawChanged
-            ? "YES"
-            : "NO");
-
-    if (beforeWords >= afterWords)
+    while (true)
     {
-        Serial.print(
-            "Raw word difference            : ");
+        taskAYields++;
 
-        Serial.println(
-            (unsigned long)(beforeWords -
-                            afterWords));
-
-        Serial.print(
-            "Raw byte difference            : ");
-
-        Serial.println(
-            (unsigned long)((beforeWords -
-                             afterWords) *
-                            sizeof(StackType_t)));
-    }
-
-    /*
-     * ------------------------------------------------------------------------
-     * Compare VertexRT result.
-     * ------------------------------------------------------------------------
-     */
-
-    bool vertexChanged =
-        (finalHighWater < initialHighWater &&
-         finalUsed > initialUsed);
-
-    Serial.print(
-        "VertexRT usage detected        : ");
-
-    Serial.println(
-        vertexChanged
-            ? "YES"
-            : "NO");
-
-    /*
-     * ------------------------------------------------------------------------
-     * Check API consistency.
-     * ------------------------------------------------------------------------
-     */
-
-    bool apiConsistent =
-        (finalHighWater ==
-         finalFree);
-
-    Serial.print(
-        "VertexRT API consistency       : ");
-
-    Serial.println(
-        apiConsistent
-            ? "PASS"
-            : "FAIL");
-
-    /*
-     * ------------------------------------------------------------------------
-     * Check accounting.
-     * ------------------------------------------------------------------------
-     */
-
-    size_t totalStackBytes =
-        2048U *
-        sizeof(StackType_t);
-
-    bool accountingValid =
-        (finalUsed +
-             finalHighWater ==
-         totalStackBytes);
-
-    Serial.print(
-        "Stack accounting               : ");
-
-    Serial.println(
-        accountingValid
-            ? "PASS"
-            : "FAIL");
-
-    /*
-     * ------------------------------------------------------------------------
-     * Diagnostic conclusion.
-     * ------------------------------------------------------------------------
-     */
-
-    print_separator();
-
-    Serial.println(
-        "[DIAGNOSTIC] CONCLUSION");
-
-    if (!rawChanged)
-    {
-        Serial.println(
-            "FreeRTOS itself did NOT detect additional stack usage.");
-
-        Serial.println(
-            "This means the issue is in the test workload / actual");
-        Serial.println(
-            "execution stack, not the VertexRT conversion.");
-    }
-    else if (rawChanged &&
-             !vertexChanged)
-    {
-        Serial.println(
-            "FreeRTOS detected stack usage, but VertexRT did not.");
-
-        Serial.println(
-            "This points to vrt_task_stack_* conversion/API logic.");
-    }
-    else
-    {
-        Serial.println(
-            "Both FreeRTOS and VertexRT detected stack usage.");
-
-        Serial.println(
-            "The stack-monitoring mechanism is functioning.");
-    }
-
-    print_separator();
-
-    /*
-     * ------------------------------------------------------------------------
-     * Existing qualification result
-     * ------------------------------------------------------------------------
-     */
-
-    bool result =
-        initialState &&
-        vertexChanged &&
-        apiConsistent &&
-        accountingValid;
-
-    Serial.print(
-        "STEP 10 RESULT: ");
-
-    Serial.println(
-        result
-            ? "PASS"
-            : "FAIL");
-
-    Serial.println(
-        "----------------------------------------");
-
-    testComplete = true;
-
-    for (;;)
-    {
+        /*
+         * Equal-priority cooperative scheduling.
+         */
         vrt_task_yield();
     }
 }
 
 /*
  * ============================================================================
- * Arduino Setup
+ * Task B
+ * ============================================================================
+ */
+
+static void taskBEntry(
+    void *argument)
+{
+    (void)argument;
+
+    taskBStarted = true;
+
+    while (true)
+    {
+        taskBYields++;
+
+        /*
+         * Equal-priority cooperative scheduling.
+         */
+        vrt_task_yield();
+    }
+}
+
+/*
+ * ============================================================================
+ * Controller
+ * ============================================================================
+ */
+
+static void controllerEntry(
+    void *argument)
+{
+    (void)argument;
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("STEP 11: CPU / RUNTIME STATISTICS");
+    Serial.println("========================================");
+
+    Serial.println();
+    Serial.println("Controller started.");
+    Serial.println("Blocking for 2 seconds...");
+
+    /*
+     * At VRT_TICK_HZ = 1000 Hz, 2000 ticks = approximately 2 seconds.
+     */
+    vrt_task_delay(2000U);
+
+    /*
+     * If execution reaches here, the controller was successfully
+     * blocked and later woken by the kernel tick.
+     */
+    Serial.println();
+    Serial.println("Controller woke.");
+
+    /*
+     * IMPORTANT:
+     *
+     * Do NOT call vrt_task_yield() here.
+     *
+     * The controller has higher priority than A/B, and the current
+     * scheduler's cooperative schedule() can select another READY
+     * task when yield() is called.
+     *
+     * We want to collect the statistics immediately.
+     */
+
+    uint64_t runtimeA =
+        vrt_task_runtime_us(
+            &taskA);
+
+    uint64_t runtimeB =
+        vrt_task_runtime_us(
+            &taskB);
+
+    uint64_t controllerRuntime =
+        vrt_task_runtime_us(
+            &controller);
+
+    uint64_t totalRuntime =
+        runtimeA +
+        runtimeB;
+
+    uint32_t cpuA =
+        vrt_task_cpu_percent(
+            &taskA);
+
+    uint32_t cpuB =
+        vrt_task_cpu_percent(
+            &taskB);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Statistics
+     * ------------------------------------------------------------------------
+     */
+
+    Serial.println();
+    Serial.println("----------------------------------------");
+    Serial.println("RUNTIME STATISTICS");
+    Serial.println("----------------------------------------");
+
+    Serial.print(
+        "Task A started    : ");
+
+    Serial.println(
+        taskAStarted
+            ? "YES"
+            : "NO");
+
+    Serial.print(
+        "Task B started    : ");
+
+    Serial.println(
+        taskBStarted
+            ? "YES"
+            : "NO");
+
+    Serial.print(
+        "Task A runtime us : ");
+
+    Serial.println(
+        (unsigned long long)runtimeA);
+
+    Serial.print(
+        "Task B runtime us : ");
+
+    Serial.println(
+        (unsigned long long)runtimeB);
+
+    Serial.print(
+        "Controller us     : ");
+
+    Serial.println(
+        (unsigned long long)controllerRuntime);
+
+    Serial.print(
+        "Total A+B us      : ");
+
+    Serial.println(
+        (unsigned long long)totalRuntime);
+
+    Serial.print(
+        "Task A CPU %      : ");
+
+    Serial.println(
+        cpuA);
+
+    Serial.print(
+        "Task B CPU %      : ");
+
+    Serial.println(
+        cpuB);
+
+    Serial.print(
+        "Task A yields     : ");
+
+    Serial.println(
+        (unsigned long)taskAYields);
+
+    Serial.print(
+        "Task B yields     : ");
+
+    Serial.println(
+        (unsigned long)taskBYields);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Runtime reset qualification
+     * ------------------------------------------------------------------------
+     */
+
+    vrt_task_runtime_reset(
+        &taskA);
+
+    uint64_t resetRuntime =
+        vrt_task_runtime_us(
+            &taskA);
+
+    /*
+     * ------------------------------------------------------------------------
+     * Qualification
+     * ------------------------------------------------------------------------
+     */
+
+    bool tasksRan =
+        taskAStarted &&
+        taskBStarted;
+
+    bool runtimePass =
+        runtimeA > 0U &&
+        runtimeB > 0U;
+
+    bool switchingPass =
+        taskAYields > 0U &&
+        taskBYields > 0U;
+
+    bool cpuPass =
+        cpuA > 0U &&
+        cpuB > 0U;
+
+    bool totalPass =
+        totalRuntime >= runtimeA &&
+        totalRuntime >= runtimeB;
+
+    bool resetPass =
+        resetRuntime == 0U;
+
+    Serial.println();
+    Serial.println("----------------------------------------");
+    Serial.println("QUALIFICATION");
+    Serial.println("----------------------------------------");
+
+    Serial.print(
+        "Both tasks executed : ");
+
+    Serial.println(
+        tasksRan
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Runtime accumulation: ");
+
+    Serial.println(
+        runtimePass
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Context switching   : ");
+
+    Serial.println(
+        switchingPass
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "CPU statistics      : ");
+
+    Serial.println(
+        cpuPass
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Runtime total       : ");
+
+    Serial.println(
+        totalPass
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Runtime reset       : ");
+
+    Serial.println(
+        resetPass
+            ? "PASS"
+            : "FAIL");
+
+    bool result =
+        tasksRan &&
+        runtimePass &&
+        switchingPass &&
+        cpuPass &&
+        totalPass &&
+        resetPass;
+
+    Serial.println();
+    Serial.println("----------------------------------------");
+
+    Serial.print(
+        "STEP 11 RESULT: ");
+
+    Serial.println(
+        result
+            ? "PASS"
+            : "FAIL");
+
+    Serial.println("----------------------------------------");
+
+    /*
+     * Stop the test only after all measurements have been printed.
+     */
+    for (;;)
+    {
+        /*
+         * Do not yield. Just remain here.
+         */
+    }
+}
+
+/*
+ * ============================================================================
+ * Setup
  * ============================================================================
  */
 
@@ -525,7 +357,7 @@ void setup()
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("VertexRT Step 10 Test");
+    Serial.println("VertexRT Step 11 Test");
     Serial.println("========================================");
 
     /*
@@ -540,58 +372,112 @@ void setup()
     /*
      * Kernel tick.
      */
-    vrt_tick_init();
-    vrt_tick_start();
+    bool tickInit =
+        vrt_tick_init();
 
-    Serial.println(
-        "Kernel tick : PASS");
-
-    /*
-     * VertexRT task.
-     */
-    vrt_task_init(
-        &testTask,
-        step10TestTask,
-        NULL,
-        2,
-        step10TaskStack,
-        2048,
-        "Step10");
-
-    bool taskReady =
-        (testTask.state ==
-         VRT_TASK_READY);
+    bool tickStart =
+        vrt_tick_start();
 
     Serial.print(
-        "Test task ready : ");
+        "Kernel tick init : ");
 
     Serial.println(
-        taskReady
+        tickInit
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Kernel tick start : ");
+
+    Serial.println(
+        tickStart
             ? "PASS"
             : "FAIL");
 
     /*
-     * Register task.
+     * Task A.
      */
-    vrt_scheduler_add_task(
-        &scheduler,
-        &testTask);
+    vrt_task_init(
+        &taskA,
+        taskAEntry,
+        NULL,
+        2U,
+        stackA,
+        2048U,
+        "TaskA");
+
+    /*
+     * Task B.
+     */
+    vrt_task_init(
+        &taskB,
+        taskBEntry,
+        NULL,
+        2U,
+        stackB,
+        2048U,
+        "TaskB");
+
+    /*
+     * Controller has higher priority and starts first.
+     */
+    vrt_task_init(
+        &controller,
+        controllerEntry,
+        NULL,
+        3U,
+        controllerStack,
+        2048U,
+        "Controller");
+
+    /*
+     * Register tasks.
+     */
+    bool addA =
+        vrt_scheduler_add_task(
+            &scheduler,
+            &taskA);
+
+    bool addB =
+        vrt_scheduler_add_task(
+            &scheduler,
+            &taskB);
+
+    bool addController =
+        vrt_scheduler_add_task(
+            &scheduler,
+            &controller);
+
+    Serial.print(
+        "Task A add : ");
+
+    Serial.println(
+        addA
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Task B add : ");
+
+    Serial.println(
+        addB
+            ? "PASS"
+            : "FAIL");
+
+    Serial.print(
+        "Controller add : ");
+
+    Serial.println(
+        addController
+            ? "PASS"
+            : "FAIL");
 
     Serial.println(
         "Starting scheduler...");
 
-    /*
-     * Start VertexRT.
-     */
     vrt_scheduler_start(
         &scheduler);
 }
-
-/*
- * ============================================================================
- * Arduino Loop
- * ============================================================================
- */
 
 void loop()
 {
