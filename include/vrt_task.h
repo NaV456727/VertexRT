@@ -82,6 +82,16 @@ extern "C"
         bool timedWaitActive;
 
         /*
+         * Interrupt notification wait state.
+         *
+         * These fields are valid while the task is blocked waiting
+         * for a GPIO interrupt notification.
+         */
+        bool interruptWaitActive;
+        uint8_t interruptWaitGpio;
+        bool interruptWaitResult;
+
+        /*
          * Runtime statistics.
          *
          * runtimeUs:

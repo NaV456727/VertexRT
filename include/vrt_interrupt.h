@@ -11,7 +11,7 @@ extern "C"
 
     /*
      * ============================================================================
-     * Interrupt edge configuration
+     * Interrupt trigger
      * ============================================================================
      */
 
@@ -27,15 +27,12 @@ extern "C"
 
     /*
      * ============================================================================
-     * Interrupt callback
+     * ISR callback
      * ============================================================================
-     *
-     * IMPORTANT:
      *
      * This callback executes inside the hardware ISR.
      *
-     * It must therefore be very short and ISR-safe.
-     * Do not use Serial, delay(), malloc(), or other blocking operations.
+     * It must be short and ISR-safe.
      * ============================================================================
      */
 
@@ -44,22 +41,12 @@ extern "C"
 
     /*
      * ============================================================================
-     * Interrupt management
+     * Interrupt subsystem
      * ============================================================================
      */
 
-    /*
-     * Initialize the interrupt subsystem.
-     *
-     * The ESP32 GPIO ISR service is installed on first use.
-     */
     bool vrt_interrupt_init(void);
 
-    /*
-     * Attach a GPIO interrupt.
-     *
-     * The supplied callback executes from the ISR.
-     */
     bool vrt_interrupt_attach_gpio(
         uint8_t gpio,
         vrt_interrupt_trigger_t trigger,
@@ -68,46 +55,44 @@ extern "C"
         vrt_interrupt_handler_t handler,
         void *argument);
 
-    /*
-     * Detach a GPIO interrupt.
-     */
     bool vrt_interrupt_detach_gpio(
         uint8_t gpio);
 
-    /*
-     * Enable an attached GPIO interrupt.
-     */
     bool vrt_interrupt_enable(
         uint8_t gpio);
 
-    /*
-     * Disable an attached GPIO interrupt.
-     */
     bool vrt_interrupt_disable(
         uint8_t gpio);
 
-    /*
-     * Return the number of times the interrupt has fired.
-     */
     uint32_t vrt_interrupt_get_count(
         uint8_t gpio);
 
-    /*
-     * Reset the software interrupt counter.
-     */
     bool vrt_interrupt_reset_count(
         uint8_t gpio);
 
-    /*
-     * Return whether an interrupt is currently attached.
-     */
     bool vrt_interrupt_is_attached(
         uint8_t gpio);
 
-    /*
-     * Return whether an interrupt is currently enabled.
-     */
     bool vrt_interrupt_is_enabled(
+        uint8_t gpio);
+
+    /*
+     * ============================================================================
+     * ISR → VertexRT task notification
+     * ============================================================================
+     *
+     * Blocks the currently executing VertexRT task until the specified GPIO
+     * interrupt occurs.
+     *
+     * Returns:
+     *
+     *     true  = interrupt notification received
+     *     false = wait could not be established
+     *
+     * If an interrupt occurred before the task called this function, the
+     * pending notification is consumed immediately.
+     */
+    bool vrt_interrupt_wait(
         uint8_t gpio);
 
 #ifdef __cplusplus

@@ -1,22 +1,22 @@
 #include "vrt_interrupt.h"
 
+#include "vrt_task.h"
+#include "vrt_scheduler.h"
+#include "vrt_freertos_backend.h"
+#include "vrt_critical.h"
+
 #include "driver/gpio.h"
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
+#include "esp_attr.h"
 
 #include <stddef.h>
-
-/*
- * ============================================================================
- * Configuration
- * ============================================================================
- */
+#include <stdint.h>
 
 #define VRT_INTERRUPT_MAX_GPIO 40U
 
 /*
  * ============================================================================
- * GPIO interrupt context
+ * Interrupt context
  * ============================================================================
  */
 
@@ -27,8 +27,18 @@ typedef struct
 
     volatile uint32_t count;
 
+    /*
+     * Notifications that occurred while no task was waiting.
+     */
+    volatile uint32_t pendingNotifications;
+
     vrt_interrupt_handler_t handler;
     void *argument;
+
+    /*
+     * At most one VertexRT task waits on a GPIO interrupt at a time.
+     */
+    vrt_task_t *waitingTask;
 
 } vrt_interrupt_context_t;
 
@@ -72,7 +82,7 @@ vrt_interrupt_convert_trigger(
 
 /*
  * ============================================================================
- * ISR wrapper
+ * ISR
  * ============================================================================
  */
 
@@ -89,19 +99,163 @@ vrt_interrupt_gpio_isr(
     }
 
     /*
-     * Count the hardware interrupt first.
+     * Count every hardware interrupt.
      */
     context->count++;
 
     /*
-     * Execute user callback if registered.
+     * Record a pending notification.
      *
-     * The callback itself must be ISR-safe.
+     * If a task is already waiting, one notification will
+     * immediately be consumed below.
+     */
+    if (context->pendingNotifications <
+        UINT32_MAX)
+    {
+        context->pendingNotifications++;
+    }
+
+    /*
+     * User ISR callback.
      */
     if (context->handler != NULL)
     {
         context->handler(
             context->argument);
+    }
+
+    /*
+     * ------------------------------------------------------------------------
+     * Wake a VertexRT task waiting on this GPIO.
+     * ------------------------------------------------------------------------
+     */
+
+    vrt_task_t *waitingTask =
+        context->waitingTask;
+
+    if (waitingTask == NULL)
+    {
+        return;
+    }
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return;
+    }
+
+    bool shouldPreempt =
+        false;
+
+    vrt_task_t *current =
+        scheduler->currentTask;
+
+    /*
+     * Protect the VertexRT scheduler structures while
+     * modifying them from the ISR.
+     */
+    vrt_kernel_critical_enter_isr();
+
+    /*
+     * Re-check the waiter after entering the critical section.
+     */
+    if (context->waitingTask == waitingTask &&
+        waitingTask->state == VRT_TASK_BLOCKED)
+    {
+        /*
+         * Consume the notification being delivered to
+         * the waiting task.
+         */
+        if (context->pendingNotifications > 0U)
+        {
+            context->pendingNotifications--;
+        }
+
+        context->waitingTask =
+            NULL;
+
+        waitingTask->interruptWaitActive =
+            false;
+
+        waitingTask->interruptWaitResult =
+            true;
+
+        waitingTask->state =
+            VRT_TASK_READY;
+
+        /*
+         * Return the task to the READY queue.
+         */
+        if (!vrt_list_push_back(
+                &scheduler->readyQueue,
+                &waitingTask->node))
+        {
+            /*
+             * Roll back if the READY queue insertion fails.
+             */
+            waitingTask->state =
+                VRT_TASK_BLOCKED;
+
+            waitingTask->interruptWaitActive =
+                true;
+
+            waitingTask->interruptWaitResult =
+                false;
+
+            context->waitingTask =
+                waitingTask;
+
+            if (context->pendingNotifications <
+                UINT32_MAX)
+            {
+                context->pendingNotifications++;
+            }
+        }
+        else
+        {
+            /*
+             * Preempt the current task only if the
+             * interrupt-woken task has higher priority.
+             */
+            if (current == NULL ||
+                current == scheduler->idleTask ||
+                waitingTask->priority >
+                    current->priority)
+            {
+                if (current != NULL &&
+                    current != waitingTask &&
+                    current->state ==
+                        VRT_TASK_RUNNING)
+                {
+                    current->state =
+                        VRT_TASK_READY;
+                }
+
+                waitingTask->state =
+                    VRT_TASK_RUNNING;
+
+                scheduler->currentTask =
+                    waitingTask;
+
+                shouldPreempt =
+                    true;
+            }
+        }
+    }
+
+    vrt_kernel_critical_exit_isr();
+
+    /*
+     * Physical context switching is deferred to the backend's
+     * ISR-safe notification mechanism.
+     */
+    if (shouldPreempt)
+    {
+        vrt_freertos_backend_on_preemption(
+            current,
+            waitingTask);
     }
 }
 
@@ -118,12 +272,6 @@ bool vrt_interrupt_init(void)
         return true;
     }
 
-    /*
-     * Install the ESP32 GPIO ISR service.
-     *
-     * ESP_INTR_FLAG_IRAM allows ISR handlers registered with
-     * IRAM-safe code to execute from IRAM.
-     */
     esp_err_t result =
         gpio_install_isr_service(
             ESP_INTR_FLAG_IRAM);
@@ -134,9 +282,6 @@ bool vrt_interrupt_init(void)
         return false;
     }
 
-    /*
-     * Clear software state.
-     */
     for (uint32_t i = 0U;
          i < VRT_INTERRUPT_MAX_GPIO;
          ++i)
@@ -150,10 +295,16 @@ bool vrt_interrupt_init(void)
         vrt_interrupt_contexts[i].count =
             0U;
 
+        vrt_interrupt_contexts[i].pendingNotifications =
+            0U;
+
         vrt_interrupt_contexts[i].handler =
             NULL;
 
         vrt_interrupt_contexts[i].argument =
+            NULL;
+
+        vrt_interrupt_contexts[i].waitingTask =
             NULL;
     }
 
@@ -165,7 +316,7 @@ bool vrt_interrupt_init(void)
 
 /*
  * ============================================================================
- * Attach GPIO interrupt
+ * Attach
  * ============================================================================
  */
 
@@ -177,25 +328,13 @@ bool vrt_interrupt_attach_gpio(
     vrt_interrupt_handler_t handler,
     void *argument)
 {
-    if (!vrt_interrupt_initialized)
+    if (!vrt_interrupt_initialized ||
+        gpio >= VRT_INTERRUPT_MAX_GPIO ||
+        handler == NULL)
     {
         return false;
     }
 
-    if (gpio >=
-        VRT_INTERRUPT_MAX_GPIO)
-    {
-        return false;
-    }
-
-    if (handler == NULL)
-    {
-        return false;
-    }
-
-    /*
-     * Do not attach twice.
-     */
     if (vrt_interrupt_contexts[gpio].attached)
     {
         return false;
@@ -211,9 +350,6 @@ bool vrt_interrupt_attach_gpio(
         return false;
     }
 
-    /*
-     * Configure GPIO.
-     */
     gpio_config_t config = {
         .pin_bit_mask =
             (1ULL << gpio),
@@ -243,11 +379,10 @@ bool vrt_interrupt_attach_gpio(
         return false;
     }
 
-    /*
-     * Prepare software context BEFORE registering
-     * the ISR so the context is valid when the ISR fires.
-     */
     vrt_interrupt_contexts[gpio].count =
+        0U;
+
+    vrt_interrupt_contexts[gpio].pendingNotifications =
         0U;
 
     vrt_interrupt_contexts[gpio].handler =
@@ -255,6 +390,9 @@ bool vrt_interrupt_attach_gpio(
 
     vrt_interrupt_contexts[gpio].argument =
         argument;
+
+    vrt_interrupt_contexts[gpio].waitingTask =
+        NULL;
 
     result =
         gpio_isr_handler_add(
@@ -276,9 +414,6 @@ bool vrt_interrupt_attach_gpio(
     vrt_interrupt_contexts[gpio].attached =
         true;
 
-    /*
-     * Start enabled.
-     */
     vrt_interrupt_contexts[gpio].enabled =
         true;
 
@@ -305,6 +440,14 @@ bool vrt_interrupt_detach_gpio(
         return false;
     }
 
+    /*
+     * Do not detach while a task is waiting.
+     */
+    if (vrt_interrupt_contexts[gpio].waitingTask != NULL)
+    {
+        return false;
+    }
+
     gpio_intr_disable(
         (gpio_num_t)gpio);
 
@@ -323,18 +466,21 @@ bool vrt_interrupt_detach_gpio(
     vrt_interrupt_contexts[gpio].enabled =
         false;
 
+    vrt_interrupt_contexts[gpio].count =
+        0U;
+
+    vrt_interrupt_contexts[gpio].pendingNotifications =
+        0U;
+
     vrt_interrupt_contexts[gpio].handler =
         NULL;
 
     vrt_interrupt_contexts[gpio].argument =
         NULL;
 
-    vrt_interrupt_contexts[gpio].count =
-        0U;
+    vrt_interrupt_contexts[gpio].waitingTask =
+        NULL;
 
-    /*
-     * Disable GPIO interrupt generation.
-     */
     gpio_set_intr_type(
         (gpio_num_t)gpio,
         GPIO_INTR_DISABLE);
@@ -344,7 +490,7 @@ bool vrt_interrupt_detach_gpio(
 
 /*
  * ============================================================================
- * Enable
+ * Enable / Disable
  * ============================================================================
  */
 
@@ -352,12 +498,8 @@ bool vrt_interrupt_enable(
     uint8_t gpio)
 {
     if (!vrt_interrupt_initialized ||
-        gpio >= VRT_INTERRUPT_MAX_GPIO)
-    {
-        return false;
-    }
-
-    if (!vrt_interrupt_contexts[gpio].attached)
+        gpio >= VRT_INTERRUPT_MAX_GPIO ||
+        !vrt_interrupt_contexts[gpio].attached)
     {
         return false;
     }
@@ -377,22 +519,12 @@ bool vrt_interrupt_enable(
     return true;
 }
 
-/*
- * ============================================================================
- * Disable
- * ============================================================================
- */
-
 bool vrt_interrupt_disable(
     uint8_t gpio)
 {
     if (!vrt_interrupt_initialized ||
-        gpio >= VRT_INTERRUPT_MAX_GPIO)
-    {
-        return false;
-    }
-
-    if (!vrt_interrupt_contexts[gpio].attached)
+        gpio >= VRT_INTERRUPT_MAX_GPIO ||
+        !vrt_interrupt_contexts[gpio].attached)
     {
         return false;
     }
@@ -414,7 +546,7 @@ bool vrt_interrupt_disable(
 
 /*
  * ============================================================================
- * Interrupt count
+ * Count / state
  * ============================================================================
  */
 
@@ -430,12 +562,6 @@ uint32_t vrt_interrupt_get_count(
     return vrt_interrupt_contexts[gpio].count;
 }
 
-/*
- * ============================================================================
- * Reset count
- * ============================================================================
- */
-
 bool vrt_interrupt_reset_count(
     uint8_t gpio)
 {
@@ -448,14 +574,11 @@ bool vrt_interrupt_reset_count(
     vrt_interrupt_contexts[gpio].count =
         0U;
 
+    vrt_interrupt_contexts[gpio].pendingNotifications =
+        0U;
+
     return true;
 }
-
-/*
- * ============================================================================
- * State
- * ============================================================================
- */
 
 bool vrt_interrupt_is_attached(
     uint8_t gpio)
@@ -479,4 +602,184 @@ bool vrt_interrupt_is_enabled(
     }
 
     return vrt_interrupt_contexts[gpio].enabled;
+}
+
+/*
+ * ============================================================================
+ * ISR → VertexRT task wait
+ * ============================================================================
+ */
+
+bool vrt_interrupt_wait(
+    uint8_t gpio)
+{
+    if (!vrt_interrupt_initialized ||
+        gpio >= VRT_INTERRUPT_MAX_GPIO)
+    {
+        return false;
+    }
+
+    vrt_interrupt_context_t *context =
+        &vrt_interrupt_contexts[gpio];
+
+    if (!context->attached ||
+        !context->enabled)
+    {
+        return false;
+    }
+
+    vrt_scheduler_t *scheduler =
+        vrt_scheduler_get_instance();
+
+    if (scheduler == NULL)
+    {
+        return false;
+    }
+
+    vrt_task_t *current =
+        vrt_freertos_backend_get_current_task();
+
+    if (current == NULL ||
+        current == scheduler->idleTask ||
+        current->isIdle)
+    {
+        return false;
+    }
+
+    /*
+     * Protect the scheduler state.
+     */
+    vrt_kernel_critical_enter();
+
+    /*
+     * If an interrupt already occurred, consume the pending
+     * notification immediately without blocking.
+     */
+    if (context->pendingNotifications > 0U)
+    {
+        context->pendingNotifications--;
+
+        vrt_kernel_critical_exit();
+
+        return true;
+    }
+
+    /*
+     * Only one task can wait on a GPIO at a time.
+     */
+    if (context->waitingTask != NULL)
+    {
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    /*
+     * Synchronize logical current task.
+     */
+    scheduler->currentTask =
+        current;
+
+    /*
+     * Register this task as the interrupt waiter.
+     */
+    context->waitingTask =
+        current;
+
+    current->interruptWaitActive =
+        true;
+
+    current->interruptWaitGpio =
+        gpio;
+
+    current->interruptWaitResult =
+        false;
+
+    /*
+     * Block current task.
+     */
+    current->state =
+        VRT_TASK_BLOCKED;
+
+    /*
+     * Remove from READY queue.
+     */
+    if (!vrt_list_remove(
+            &scheduler->readyQueue,
+            &current->node))
+    {
+        context->waitingTask =
+            NULL;
+
+        current->interruptWaitActive =
+            false;
+
+        current->state =
+            VRT_TASK_RUNNING;
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    /*
+     * Select another runnable task.
+     */
+    scheduler->currentTask =
+        NULL;
+
+    vrt_scheduler_schedule(
+        scheduler);
+
+    vrt_task_t *next =
+        scheduler->currentTask;
+
+    /*
+     * No replacement task.
+     */
+    if (next == NULL ||
+        next == current)
+    {
+        context->waitingTask =
+            NULL;
+
+        current->interruptWaitActive =
+            false;
+
+        current->state =
+            VRT_TASK_RUNNING;
+
+        (void)vrt_list_push_back(
+            &scheduler->readyQueue,
+            &current->node);
+
+        scheduler->currentTask =
+            current;
+
+        vrt_kernel_critical_exit();
+
+        return false;
+    }
+
+    vrt_kernel_critical_exit();
+
+    /*
+     * Physically switch to the selected VertexRT task.
+     *
+     * When this task is later woken by the ISR, execution resumes
+     * here.
+     */
+    vrt_freertos_backend_switch_to(
+        next);
+
+    bool result =
+        current->interruptWaitResult;
+
+    current->interruptWaitResult =
+        false;
+
+    current->interruptWaitActive =
+        false;
+
+    return result;
 }
